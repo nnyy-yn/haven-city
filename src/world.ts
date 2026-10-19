@@ -4,6 +4,7 @@ import { cellToWorld, TILE, type Building, type BuildingKind, type CameraMode, t
 import { CityEventVisuals } from './city-events';
 import { DistrictBatch } from './district-batch';
 import { TransitVisuals } from './transit-visuals';
+import { PrisonVisuals } from './prison-visuals';
 
 const C = {
   grass: '#74865b', grassLight: '#92a273', path: '#d4cbb6', concrete: '#c3c5bc', asphalt: '#3c474a',
@@ -137,6 +138,7 @@ function solar(batch: Batch, x: number, y: number, z: number, w = 2.4, d = 1.6) 
 interface PersonRig { group: THREE.Group; arms: THREE.Object3D[]; legs: THREE.Object3D[] }
 interface TrafficNode { x:number; z:number; neighbours:string[] }
 interface TrafficVehicle { from:string; to:string; previous:string; progress:number; yaw:number; turns:number }
+interface PrisonFacilities { classroom: number; workshop: number; infirmary: number }
 function makePlayer(): PersonRig {
   const group = new THREE.Group(); const body = new Batch();
   body.box(mat('#e4d2b3'), 0, 1.36, 0, .44, .62, .28);
@@ -217,6 +219,7 @@ export class CityWorld {
   private eventVisuals: CityEventVisuals;
   private districtBatch: DistrictBatch;
   private transitVisuals: TransitVisuals;
+  private prisonVisuals: PrisonVisuals;
   private lightPools = new THREE.Group();
   private streetPools = new THREE.Group();
   private lightPoolMaterial: THREE.MeshBasicMaterial;
@@ -255,6 +258,7 @@ export class CityWorld {
     outline.position.y = .18; this.ghost.add(outline); this.ghost.visible = false; this.scene.add(this.ghost);
     this.createCars(); this.eventVisuals = new CityEventVisuals(this.scene);
     this.districtBatch = new DistrictBatch(this.scene); this.transitVisuals = new TransitVisuals(this.scene, makeBus());
+    this.prisonVisuals = new PrisonVisuals(this.scene, this.people);
   }
 
   private createCoast() {
@@ -358,10 +362,12 @@ export class CityWorld {
     const roadSignature = [...roads].sort().join('|'); const roadsChanged = roadSignature !== this.roadSignature;
     for (const b of state.buildings) {
       const adjacentRoads = [[0, 1], [1, 0], [0, -1], [-1, 0]].map(([dx, dz]) => Number(roads.has(`${b.gx + dx},${b.gz + dz}`))).join('');
-      const key = `${b.kind}:${b.gx},${b.gz}:${b.level}:${b.active}:${adjacentRoads}`;
+      const facilities = b.kind === 'prison' ? state.corrections?.sites.find(site => site.buildingId === b.id)?.facilities : undefined;
+      const facilityKey = facilities ? `${facilities.classroom},${facilities.workshop},${facilities.infirmary}` : '';
+      const key = `${b.kind}:${b.gx},${b.gz}:${b.level}:${b.active}:${adjacentRoads}:${facilityKey}`;
       if (this.buildingKeys.get(b.id) === key) continue;
       const old = this.buildingMeshes.get(b.id); if (old) this.removeGroup(old);
-      const group = b.kind === 'road' ? this.createRoad(b, roads) : this.createBuilding(b, roads);
+      const group = b.kind === 'road' ? this.createRoad(b, roads) : this.createBuilding(b, roads, facilities);
       group.position.set(cellToWorld(b.gx), .025, cellToWorld(b.gz));
       group.userData.buildingId = b.id; group.userData.kind = b.kind;
       group.traverse(o => { o.userData.buildingId = b.id; o.userData.kind = b.kind; });
@@ -371,6 +377,7 @@ export class CityWorld {
     const parcelSignature = state.buildings.map(b => `${b.id}:${b.gx},${b.gz}`).join('|');
     if (parcelSignature !== this.parcelSignature) { this.parcelSignature = parcelSignature; this.rebuildVacantLots(state, roads); }
     this.districtBatch.sync(this.buildingMeshes); this.transitVisuals.sync(state);
+    this.prisonVisuals.sync(state, this.buildingMeshes);
     this.eventVisuals.sync(state, this.buildingMeshes); this.highlight(this.selectedId);
   }
 
@@ -466,7 +473,7 @@ export class CityWorld {
     b.finish(this.streetFurniture); lights.finish(this.streetPools, false);
   }
 
-  private createBuilding(b: Building, roads: Set<string>) {
+  private createBuilding(b: Building, roads: Set<string>, prisonFacilities?: PrisonFacilities) {
     const group = new THREE.Group(), a = new Batch(); const r = rand(b.id + 11);
     const orientations = [[0, 1, 0], [1, 0, Math.PI / 2], [0, -1, Math.PI], [-1, 0, -Math.PI / 2]];
     for (const [dx, dz, angle] of orientations) if (roads.has(`${b.gx + dx},${b.gz + dz}`)) { group.rotation.y = angle; break; }
@@ -693,28 +700,91 @@ export class CityWorld {
         break;
       }
       case 'prison': {
-        const wall = mat('#c9c5b3');
+        const wall = mat('#c9c5b3'), trim = mat('#e2ddcd'), sage = mat('#758a77'), fence = mat('#7d8a7e');
+        const facilities = prisonFacilities ?? { classroom: 0, workshop: 0, infirmary: 0 };
+        const floors = b.level + 1, h = floors * 2.65 + .35, roofY = h + .45;
+        group.userData.prisonFloors = floors; group.userData.prisonFacilities = { ...facilities };
+        group.userData.roofHeight = roofY + (facilities.infirmary === 2 ? 1.05 : .32);
         a.box(mat('#a4ad95'), 0, .19, 0, 8.7, .2, 8.7);
-        a.box(wall, 0, 2.9, -2.3, 7.5, 5.4, 3.5); a.box(mat('#8a938a'), 0, 5.72, -2.3, 7.8, .25, 3.8);
-        for (let x = -3; x <= 3; x += 1.2) for (const y of [1.8, 3.9]) {
-          a.box(dark, x, y, -.48, .65, .95, .06); for (const dx of [-.2, 0, .2]) a.box(mat('#b9beb0'), x + dx, y, -.43, .035, .95, .05);
+        a.box(wall, 0, h / 2 + .3, -2.45, 7.7, h, 3.55);
+        a.box(trim, 0, .6, -2.45, 7.83, .6, 3.7); a.box(mat('#8a938a'), 0, roofY, -2.45, 7.95, .26, 3.83);
+        for (let floor = 0; floor < floors; floor++) {
+          const y = 1.76 + floor * 2.65;
+          a.box(trim, 0, y + 1.06, -2.45, 7.82, .11, 3.65);
+          for (let x = -3; x <= 3; x += 1.2) {
+            a.box(glass, x, y, -.64, .71, 1.12, .065);
+            for (const dx of [-.22, 0, .22]) a.box(fence, x + dx, y, -.59, .035, 1.12, .055);
+            a.box(glass, x, y, -4.26, .71, 1.12, .055);
+          }
         }
-        a.box(mat('#b4b4a0'), -3.4, 1.9, .8, 1.1, 3.5, 4.3);
-        const fence = mat('#7d8a7e');
+        solar(a, -.8, roofY + .3, -2.8, 2.55, 1.4);
+        a.box(mat('#a5afa5'), 2.65, roofY + .35, -3.15, 1.35, .45, 1.0);
+        a.box(mat('#b4b4a0'), -3.28, 1.78, 1.1, 1.65, 2.95, 3.6);
+        a.box(trim, -3.28, 3.33, 1.1, 1.88, .18, 3.84);
+        a.box(dark, -.05, 1.26, -.61, 1.1, 1.9, .09); a.box(trim, -.05, 2.45, -.24, 1.75, .17, .9);
+        // The front gate has a clear visitor entrance, keeping services outside the building.
         for (const side of [-1, 1]) {
           for (let z = -.1; z < 4.5; z += .45) a.box(fence, side * 4.25, 1.6, z, .045, 2.8, .045);
           for (const y of [.7, 1.65, 2.65, 3.1]) a.box(fence, side * 4.25, y, 2.1, .045, .045, 4.8);
+          a.box(trim, side * 1.13, 1.48, 4.18, .32, 2.5, .39);
+          for (let x = 1.45; x <= 4.3; x += .43) a.box(fence, side * x, 1.6, 4.25, .045, 2.8, .045);
+          for (const y of [.7, 1.65, 2.65, 3.1]) a.box(fence, side * 2.81, y, 4.25, 2.87, .045, .045);
+          for (let x = .12; x < .99; x += .22) a.box(fence, side * x, 1.37, 4.2, .04, 2.16, .04);
+          a.box(sage, side * .5, 2.4, 4.2, .96, .07, .06);
         }
-        for (let x = -4.2; x <= 4.3; x += .45) a.box(fence, x, 1.6, 4.25, .045, 2.8, .045);
-        for (const y of [.7, 1.65, 2.65, 3.1]) a.box(fence, 0, y, 4.25, 8.5, .045, .045);
-        a.box(wall, 3.5, 3.25, 3.5, 1.4, 6.1, 1.4); a.box(glass, 3.5, 6.2, 3.5, 1.7, .95, 1.7); a.box(mat('#7d8173'), 3.5, 6.8, 3.5, 2.1, .2, 2.1);
-        a.box(mat('#c5c3a9'), .2, .35, 2.0, 3.0, .05, 3.2); a.box(mat('#e3dfc8'), .2, .39, 2.0, 2.6, .03, .05);
-        addSign(a, '栖 湾 矫 正 中 心', '#687568', 4.95, -.49, 6.1, .6);
+        a.box(trim, 0, 2.73, 4.15, 2.82, .2, .92); a.box(sage, 0, 2.61, 4.64, 2.8, .24, .07);
+        a.add(planeGeo, sign('访 客 接 待', '#687568'), 0, 2.61, 4.69, 2.4, .19, 1);
+        a.box(wall, 3.55, 2.94, 3.42, 1.17, 5.35, 1.18); a.box(glass, 3.55, 5.8, 3.42, 1.5, .7, 1.52); a.box(mat('#7d8173'), 3.55, 6.27, 3.42, 1.91, .2, 1.94);
+        a.box(mat('#c5c3a9'), -.4, .35, 2.03, 3.9, .06, 3.25);
+        for (const x of [-2.21, 1.41]) a.box(mat('#e3dfc8'), x, .39, 2.03, .04, .025, 2.98);
+        for (const z of [.55, 3.5]) a.box(mat('#e3dfc8'), -.4, .39, z, 3.65, .025, .045);
+        a.box(mat(C.wood), -.35, .94, 2.16, 1.5, .13, .7);
+        for (const x of [-.91, .21]) a.box(dark, x, .63, 2.16, .075, .57, .45);
+        bench(a, -.35, 1.51); bench(a, -.35, 2.92, Math.PI);
+        if (facilities.classroom > 0) {
+          a.box(sage, -3.28, .65, 2.94, 1.62, .45, .06);
+          a.box(glass, -3.28, 1.83, 2.94, 1.26, 1.42, .065);
+          a.box(trim, -3.28, 1.83, 2.99, .055, 1.48, .035);
+          a.box(glass, -2.43, 1.88, .62, .06, 1.37, 1.7);
+          a.add(planeGeo, sign(facilities.classroom > 1 ? '学习室 II' : '学习室', '#687568'), -3.28, 2.77, 3.015, 1.46, .23, 1);
+          a.box(mat('#a59575'), -2.36, .86, 1.65, .16, .98, 1.1);
+          for (let i = 0; i < 5; i++) a.box(i % 2 ? sage : mat('#b18c65'), -2.25, .65 + i * .15, 1.65, .16, .1, .63);
+          if (facilities.classroom > 1) {
+            a.box(trim, -3.28, 3.55, 1.0, 1.38, .26, 2.4); a.box(glass, -3.28, 3.72, 1.0, 1.15, .1, 2.16);
+            a.box(trim, -3.28, 3.8, 1.0, .045, .045, 2.2);
+          }
+        }
+        if (facilities.workshop > 0) {
+          const wood = mat(C.wood);
+          for (const x of [1.65, 3.44]) for (const z of [-.06, 1.7]) a.box(sage, x, 1.51, z, .075, 2.3, .075);
+          a.box(sage, 2.55, 2.67, .82, 2.1, .16, 2.1);
+          for (let z = -.06; z < 1.8; z += .36) a.box(trim, 2.55, 2.79, z, 1.9, .065, .08);
+          a.box(wood, 2.56, 1.01, .69, 1.27, .13, .7);
+          for (const x of [2.05, 3.07]) a.box(dark, x, .66, .69, .085, .65, .52);
+          a.box(mat('#b18c65'), 2.87, 1.18, .7, .32, .23, .36); a.box(dark, 2.34, 1.12, .7, .48, .065, .07);
+          a.add(planeGeo, sign(facilities.workshop > 1 ? '技能工坊 II' : '技能工坊', '#687568'), 2.55, 2.64, 1.91, 1.95, .23, 1);
+          if (facilities.workshop > 1) {
+            a.box(sage, 2.55, 2.86, .82, 2.08, .08, 2.08);
+            a.box(wood, 2.9, .72, 1.35, .65, .58, .45); a.box(trim, 2.9, 1.04, 1.35, .71, .08, .5);
+            a.box(mat('#a5afa5'), 2.55, 3.07, .35, .5, .34, .6);
+          }
+        }
+        if (facilities.infirmary > 0) {
+          a.box(sage, 2.37, 1.29, -.53, 1.06, 1.83, .07); a.box(glass, 2.37, 1.61, -.47, .71, .65, .045);
+          a.box(trim, 2.37, 2.53, -.12, 1.74, .14, 1.05);
+          a.box(trim, 2.37, 3.01, -.54, .73, .68, .08);
+          a.box(sage, 2.37, 3.02, -.48, .16, .47, .025); a.box(sage, 2.37, 3.02, -.46, .47, .16, .025);
+          if (facilities.infirmary > 1) {
+            a.box(trim, 2.18, roofY + .53, -2.8, 1.85, .8, 1.5); a.box(sage, 2.18, roofY + .99, -2.8, 2.0, .16, 1.65);
+            for (const x of [1.65, 2.18, 2.71]) a.box(glass, x, roofY + .59, -2.02, .33, .32, .045);
+          }
+        }
+        addSign(a, '栖 湾 矫 正 中 心', '#687568', 4.7, -.535, 5.9, .48);
         break;
       }
     }
     if(b.level>1){
-      if(!['home','apartment','office','park','school','firestation','busstop'].includes(b.kind))group.scale.y=1+(b.level-1)*.16;
+      if(!['home','apartment','office','park','school','firestation','busstop','prison'].includes(b.kind))group.scale.y=1+(b.level-1)*.16;
       // Bronze entry markers make upgraded public facilities legible from the street.
       a.box(mat('#ac9469'),3.6,.75,3.9,.65,1.1,.12);
       for(let i=0;i<b.level;i++)a.box(mat('#eee2bb'),3.42+i*.17,.8,3.98,.065,.4,.025);
@@ -744,6 +814,7 @@ export class CityWorld {
     this.player.position.set(state.player.x, .06, state.player.z); this.player.rotation.y = state.player.yaw;
     this.player.visible = mode !== 'first' && !state.transit.journey;
     this.transitVisuals.update(step, state, mode);
+    this.prisonVisuals.update(step, state);
     const distance = this.lastPlayer.distanceTo(new THREE.Vector2(state.player.x, state.player.z));
     const walk = distance > .003 ? Math.sin(this.walkTime * 10) * .55 : 0;
     this.playerRig.legs.forEach((limb, i) => limb.rotation.x = i ? -walk : walk);
@@ -803,12 +874,12 @@ export class CityWorld {
 
   getEventMarkers() { return this.eventVisuals.getMarkers().map(marker => ({ ...marker })); }
   setStaticBatching(enabled: boolean) { this.districtBatch.setEnabled(enabled); }
-  getRenderDiagnostics() { return { static: this.districtBatch.getDiagnostics(), transit: this.transitVisuals.getDiagnostics() }; }
+  getRenderDiagnostics() { return { static: this.districtBatch.getDiagnostics(), transit: this.transitVisuals.getDiagnostics(), prison: this.prisonVisuals.getDiagnostics() }; }
 
   private removeGroup(group: THREE.Group) { this.scene.remove(group); this.clearGroup(group); }
   private clearGroup(group: THREE.Group) { group.traverse(o => { if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose(); }); group.clear(); }
   dispose() {
-    this.eventVisuals.dispose(); this.districtBatch.dispose(); this.transitVisuals.dispose();
+    this.eventVisuals.dispose(); this.districtBatch.dispose(); this.transitVisuals.dispose(); this.prisonVisuals.dispose();
     const ownedMaterials = new Set<THREE.Material>();
     this.scene.traverse(o => {
       const mesh = o as THREE.Mesh;

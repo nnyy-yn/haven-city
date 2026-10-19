@@ -19,6 +19,13 @@ export const PRISON_RULES = {
  strict: { name:'严格管理',description:'加强巡逻与收押，提高治安，服刑时间更长，不安程度会逐渐上升。',upkeep:1.12,perPerson:7,safety:9,arrest:1.6,sentence:60,rehabilitation:-.28,unrest:.65,grant:18 }
 } as const;
 export interface PrisonManagement { intake: boolean; regime: PrisonRegime; unrest: number; rehabilitation: number; released: number; phase: string }
+export type PrisonFacility = 'classroom' | 'workshop' | 'infirmary';
+export type PrisonStaff = 'guards' | 'counselors';
+export type PrisonActivity = 'work' | 'education' | 'recreation';
+export type PrisonSlot = 'morning' | 'afternoon' | 'evening';
+export type PrisonService = 'counsel' | 'teach';
+export interface PrisonSite { buildingId: number; facilities: Record<PrisonFacility, number>; staff: Record<PrisonStaff, number>; schedule: Record<PrisonSlot, PrisonActivity>; serviceVisits: number; nextServiceAt: number }
+export interface CorrectionsState { sites: PrisonSite[]; intakeProgress: number; releaseProgress: number }
 export interface CityStats { population: number; capacity: number; jobs: number; employed: number; happiness: number; income: number; expenses: number; power: number; powerNeed: number; water: number; waterNeed: number; safety: number; prisoners: number; prisonCapacity: number; crime: number; landValue: number; education: number; fireCoverage: number; transitCoverage: number; transitRiders: number; transitIncome: number; transitExpenses: number }
 export interface TransitJourney { fromId: number; toId: number; path: { x: number; z: number }[]; distance: number; travelled: number; fare: number }
 export interface TransitState { enabled: boolean; fare: number; totalTrips: number; journey: TransitJourney | null }
@@ -53,9 +60,9 @@ export const CITY_EVENTS:Record<CityEventKind,{name:string;description:string;ic
 };
 export interface Mission { id: string; title: string; description: string; target: number; progress: number; reward: number; completed: boolean }
 export interface Notice { id: number; text: string; kind: 'good' | 'info' | 'bad'; time: number }
-export interface GameState { version: number; money: number; day: number; hour: number; speed: Speed; tax: number; buildings: Building[]; residents: Resident[]; player: Player; stats: CityStats; missions: Mission[]; notices: Notice[]; nextId: number; elapsed: number; weather: string; homes: HomeInterior[]; interior: InteriorVisit | null; prison: PrisonManagement; progression:Progression; civic:CivicState; transit: TransitState }
+export interface GameState { version: number; money: number; day: number; hour: number; speed: Speed; tax: number; buildings: Building[]; residents: Resident[]; player: Player; stats: CityStats; missions: Mission[]; notices: Notice[]; nextId: number; elapsed: number; weather: string; homes: HomeInterior[]; interior: InteriorVisit | null; prison: PrisonManagement; corrections: CorrectionsState; progression:Progression; civic:CivicState; transit: TransitState }
 export interface ActionResult { ok: boolean; message: string }
-export type Interaction = 'talk' | 'eat' | 'rest' | 'work' | 'relax' | 'adopt' | 'patrol' | 'enter' | 'exit' | 'furniture' | 'study' | 'transit';
+export type Interaction = 'talk' | 'eat' | 'rest' | 'work' | 'relax' | 'adopt' | 'patrol' | 'enter' | 'exit' | 'furniture' | 'study' | 'transit' | 'corrections';
 export const FURNITURE: Record<FurnitureKind, FurnitureDef> = {
  bed: { name:'云朵双人床', cost:160, description:'睡个好觉，恢复精力。', x:-5.6,z:-4.4,rotation:0,width:3.3,depth:4,action:'睡觉 · 精力 +60',icon:'rest' },
  kitchen: { name:'原木厨房', cost:140, description:'自己做饭，每餐只需 ¥12。', x:5.8,z:-5.8,rotation:0,width:4.6,depth:1.6,action:'烹饪 · ¥12 / 饱腹 +55',icon:'eat' },

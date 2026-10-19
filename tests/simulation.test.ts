@@ -445,7 +445,7 @@ test('version one saves migrate in place, keep progress and receive default home
   delete legacy.homes; delete legacy.interior; delete legacy.prison; delete legacy.player.hygiene;
   legacy.missions = legacy.missions.filter((m: { id: string }) => !['settle', 'decorate', 'visitor'].includes(m.id));
   const migrated = new Simulation(legacy as GameState);
-  assert.equal(migrated.state.version, 4);
+  assert.equal(migrated.state.version, 5);
   assert.equal(migrated.state.money, 12345);
   assert.equal(migrated.state.player.homeId, home.id);
   assert.equal(migrated.state.player.hygiene, 88);
@@ -678,7 +678,7 @@ test('version two migration preserves homes, guests, prison policy and progress 
   const v2 = JSON.parse(JSON.stringify(old.state)); v2.version = 2; delete v2.progression; delete v2.civic;
   v2.missions = v2.missions.filter((m: { id: string }) => !['career', 'civic', 'services'].includes(m.id));
   const migrated = new Simulation(v2);
-  assert.equal(migrated.state.version, 4); assert.equal(migrated.state.money, 19456);
+  assert.equal(migrated.state.version, 5); assert.equal(migrated.state.money, 19456);
   assert.equal(migrated.state.interior!.guestId, old.state.interior!.guestId);
   assert.equal(migrated.state.homes[0].furniture.length, 7);
   assert.equal(migrated.state.prison.regime, 'strict'); assert.equal(migrated.state.prison.intake, false);

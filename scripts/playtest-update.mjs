@@ -11,7 +11,7 @@ const url = process.env.HAVEN_TEST_URL || 'http://localhost:5175/';
 const config = JSON.parse(await readFile(resolve(root, 'src/release-config.json'), 'utf8'));
 assert.ok(config.owner && config.repo, 'Update UI tests require a configured public repository');
 const currentVersion = config.version;
-const newVersion = '0.5.0';
+const newVersion = '0.6.0';
 const repository = `${config.owner}/${config.repo}`;
 const apiUrl = `https://api.github.com/repos/${repository}/releases/latest`;
 const release = (version = newVersion) => ({

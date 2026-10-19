@@ -22,12 +22,13 @@ try{
   const context=browser.contexts()[0];page=context.pages()[0]||await context.waitForEvent('page');page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(String(error)));
   await page.waitForFunction(()=>!!window.__HAVEN__);
   const state=()=>page.evaluate(()=>window.__HAVEN__.getState());
-  const initial=await state();check('actual single-file Portable EXE opens the offline 3D game',initial.version===4&&initial.buildings.length===143&&(await page.evaluate(()=>window.__HAVEN__.getView())).drawCalls>0);
+  const initial=await state();check('actual single-file Portable EXE opens the offline 3D game',initial.version===5&&initial.buildings.length===143&&Array.isArray(initial.corrections.sites)&&(await page.evaluate(()=>window.__HAVEN__.getView())).drawCalls>0);
   check('actual Portable EXE exposes only its isolated restricted bridge',await page.evaluate(version=>typeof window.require==='undefined'&&typeof window.process==='undefined'&&window.havenDesktop.version===version,version));
   const initialUpdate=await page.evaluate(()=>window.havenDesktop.getUpdateState());check('Portable mode is detected and startup makes no update check',initialUpdate.status==='idle'&&initialUpdate.message.includes('免安装'),initialUpdate);
   await page.getByRole('button',{name:'暂停',exact:true}).click();await page.keyboard.press('2');
   const beforeWork=await state();await page.locator('#life-dock [data-action="work"]').click();check('the Portable game supports actual life actions and career wages',(await state()).player.money>beforeWork.player.money);
   await page.keyboard.press('t');check('the Portable game includes the public transport controls',await page.locator('[data-ui="transit-enabled"]').isVisible());await page.locator('#drawer [data-ui="close-drawer"]').click();
+  await page.keyboard.press('c');check('the Portable game includes correction-center operations',await page.locator('#drawer').isVisible()&&await page.locator('#drawer').evaluate(el=>el.classList.contains('prison-drawer')));await page.locator('#drawer [data-ui="close-drawer"]').click();
   await page.locator('[aria-label="游戏菜单"]').click();check('the Portable menu includes import and export backup actions',await page.locator('[data-ui="export-save"]').isVisible()&&await page.locator('[data-ui="import-save"]').isVisible());
   const denied=await page.evaluate(()=>{const original=Storage.prototype.setItem;Storage.prototype.setItem=function(){throw new Error('QA full storage');};try{return window.dispatchEvent(new Event('haven:before-update-install',{cancelable:true}));}finally{Storage.prototype.setItem=original;}});
   check('storage failure is reported without approving a restart',denied===false);

@@ -22,7 +22,7 @@ try{
   check('desktop menu exposes its explicit update action',await page.locator('[data-ui="check-update"]').isVisible());
   const denied=await page.evaluate(()=>{const original=Storage.prototype.setItem;Storage.prototype.setItem=function(){throw new Error('QA simulated full storage');};try{return window.dispatchEvent(new Event('haven:before-update-install',{cancelable:true}));}finally{Storage.prototype.setItem=original;}});
   check('failed save cancels native update restart',denied===false);
-  check('successful update save handshake writes a valid city',await page.evaluate(()=>window.dispatchEvent(new Event('haven:before-update-install',{cancelable:true})))===true&&await page.evaluate(()=>JSON.parse(localStorage.getItem('haven-city-save-v1')).version===4));
+  check('successful update save handshake writes a valid city',await page.evaluate(()=>window.dispatchEvent(new Event('haven:before-update-install',{cancelable:true})))===true&&await page.evaluate(()=>JSON.parse(localStorage.getItem('haven-city-save-v1')).version===5));
   const saved=await state();await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>!!window.__HAVEN__);
   check('desktop origin restores progress after reload',(await state()).player.money===saved.player.money&&(await state()).progression.totalEarned===saved.progression.totalEarned);
   await page.locator('[aria-label="游戏菜单"]').click();

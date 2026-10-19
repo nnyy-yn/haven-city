@@ -5,6 +5,7 @@ import { CityPhysics } from './physics';
 import { InteriorWorld } from './interior';
 import { GameUI } from './ui';
 import { getTransitNetwork } from './transit';
+import { getPrisonOperations } from './prison';
 import { BUILDINGS, FURNITURE, wageFor, cellToWorld, worldToCell, type ActionResult, type Building, type BuildingKind, type CameraMode, type Interaction, type Resident, type Tool } from './types';
 import './style.css';
 
@@ -76,7 +77,23 @@ async function boot() {
   }
   function interact(action:Interaction,id?:number){
     if(action==='transit'){openTransit();return;}
+    if(action==='corrections'){openPrison(id);return;}
     runAction(()=>sim.interact(action,id));
+  }
+  function openPrison(id?:number){
+    keys.clear();drag=null;tool='select';world.setGhost(null,0,0,true);
+    if(document.pointerLockElement)document.exitPointerLock();
+    ui.openPrison(id);refresh();
+  }
+  function focusPrison(id:number){
+    const building=sim.state.buildings.find(b=>b.id===id&&b.kind==='prison');
+    if(!building){ui.toast('这座矫正中心已不存在。','info');return;}
+    ui.closeDrawer();
+    if(mode!=='city')setMode('city');
+    tool='select';keys.clear();drag=null;lastRoadCell=null;lastPaint='';world.setGhost(null,0,0,true);
+    selected=building;world.highlight(building.id);
+    target.set(cellToWorld(building.gx),0,cellToWorld(building.gz));distance=85;
+    updateCamera(1);refresh();
   }
   function openTransit(){
     keys.clear();drag=null;
@@ -140,6 +157,15 @@ async function boot() {
     socialize:(action,id)=>{runAction(()=>sim.socialize(action,id));},
     prisonRegime:regime=>{runAction(()=>sim.setPrisonRegime(regime));},
     prisonIntake:enabled=>{runAction(()=>sim.setPrisonIntake(enabled));},
+    prisonFacility:(id,kind)=>{runAction(()=>sim.upgradePrisonFacility(id,kind));},
+    prisonStaff:(id,role,count)=>{runAction(()=>sim.setPrisonStaff(id,role,count));},
+    prisonSchedule:(id,slot,activity)=>{runAction(()=>sim.setPrisonSchedule(id,slot,activity));},
+    prisonService:(id,kind)=>{
+      if(mode==='city'){ui.toast('先按 2 或 3 进入居民视角，再到现场参与服务。','info');return;}
+      const result=runAction(()=>sim.servePrison(id,kind));
+      if(result.ok){ui.closeDrawer();if(!sim.state.speed)sim.setSpeed(1);refresh();}
+    },
+    focusPrison,
     upgrade:id=>{runAction(()=>sim.upgradeBuilding(id));},
     career:track=>{runAction(()=>sim.setCareer(track));},
     policy:(policy,enabled)=>{runAction(()=>sim.setPolicy(policy,enabled));},
@@ -295,6 +321,7 @@ async function boot() {
     if(e.code==='KeyH'&&mode!=='city')interact(sim.state.interior?'exit':'enter');
     if(e.code==='KeyJ')openJournal();
     if(e.code==='KeyT')openTransit();
+    if(e.code==='KeyC')openPrison();
     if(e.code==='KeyR')focus();
     if(e.code==='KeyB'&&mode==='city'){tool=tool==='road'?'select':'road';refresh();}
   });
@@ -371,7 +398,7 @@ async function boot() {
     if(resident){contextAction='talk';contextTarget=resident.r.id;ui.setContext(`与${resident.r.name}聊聊天`,contextAction,contextTarget);return;}
     for(const {b} of nearby){
       const homeAction:[Interaction,string]=p.homeId===b.id?['enter','打开家门，回到自己的家 · H']:['adopt','在这里安家，认领自己的住宅'];
-      const actions:Partial<Record<BuildingKind,[Interaction,string]>>={home:homeAction,apartment:homeAction,shop:['eat','来一份热腾腾的午餐 · ¥35'],office:['work',`工作一班 · 赚取 ¥${wageFor(sim.state.progression)}`],park:['relax','坐下来，享受一会儿绿意'],police:['patrol','加入社区巡逻'],prison:['patrol','参与矫正中心值勤'],school:['study','参加学校进修 · 个人 ¥60 / 逻辑经验 +45'],busstop:['transit','查看公交线路与目的站 · T']};
+      const actions:Partial<Record<BuildingKind,[Interaction,string]>>={home:homeAction,apartment:homeAction,shop:['eat','来一份热腾腾的午餐 · ¥35'],office:['work',`工作一班 · 赚取 ¥${wageFor(sim.state.progression)}`],park:['relax','坐下来，享受一会儿绿意'],police:['patrol','加入社区巡逻'],prison:['corrections','矫正中心：查看运营与现场服务 · C'],school:['study','参加学校进修 · 个人 ¥60 / 逻辑经验 +45'],busstop:['transit','查看公交线路与目的站 · T']};
       const a=actions[b.kind];if(!a)continue;
       contextAction=a[0];contextTarget=b.id;ui.setContext(a[1],a[0],b.id);return;
     }
@@ -399,6 +426,7 @@ async function boot() {
     getState:()=>JSON.parse(JSON.stringify(sim.state)),
     getEventMarkers:()=>world.getEventMarkers(),
     getTransitNetwork:()=>getTransitNetwork(sim.state),
+    getPrisonOperations:()=>getPrisonOperations(sim.state),
     getRenderDiagnostics:()=>world.getRenderDiagnostics(),
     getView:()=>({mode,tool,location:sim.state.interior?'home':'city',selected:selected?.id,lifeYaw,camera:camera.position.toArray(),fps:renderCount/Math.max(1,renderTime),drawCalls:renderer.info.render.calls,triangles:renderer.info.render.triangles}),
     getScreenPosition:(x:number,z:number,height=.3)=>{const p=new THREE.Vector3(x,height,z).project(camera);return {x:(p.x+1)*innerWidth/2,y:(1-p.y)*innerHeight/2};}

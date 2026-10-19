@@ -5,7 +5,7 @@
 1. 在游戏根目录运行 `pnpm --config.verify-deps-before-run=false run build`，生成离线 HTML。
 2. 首次准备桌面依赖：`pnpm --dir desktop install --ignore-scripts`，然后 `node desktop/node_modules/electron/install.js`。
 3. 同步根 `package.json`、`desktop/package.json`、`src/release-config.json` 的版本；两处 `release-config.json` 保持相同公开仓库 owner/repo。
-4. 运行 `node scripts/build-windows.mjs`，自动复制最新离线版并输出单文件 `desktop/release/HavenCity-Portable-0.4.0-x64.exe`。
+4. 运行 `node scripts/build-windows.mjs`，自动复制最新离线版并输出单文件 `desktop/release/HavenCity-Portable-0.5.0-x64.exe`。
 5. 修改 `RELEASE_NOTES.md`，提交源码并推送对应版本标签。运行 `node scripts/github-release.mjs --publish-release`，只上传当前版本的免安装 EXE，上传完成后才公开该次发行。
 
 用户只需下载 EXE 并双击。运行不需要安装器、外网、Node.js 或开发服务器。首次启动会在临时目录展开内置运行时，完整游戏内容均已打包在 EXE 中。

@@ -1,6 +1,7 @@
-import { BUILDINGS, FURNITURE, PRISON_RULES, CAREERS, CITY_EVENTS, CITY_POLICIES, LEVEL_XP, xpLevel, wageFor, GRID, TILE, cellToWorld, type Building, type BuildingKind, type CameraMode, type CareerTrack, type CityEvent, type CityPolicy, type EventChoice, type FurnitureKind, type GameState, type Interaction, type PrisonRegime, type Resident, type SkillKind, type SocialAction, type Speed, type Tool } from './types';
+import { BUILDINGS, FURNITURE, PRISON_RULES, CAREERS, CITY_EVENTS, CITY_POLICIES, LEVEL_XP, xpLevel, wageFor, GRID, TILE, cellToWorld, type Building, type BuildingKind, type CameraMode, type CareerTrack, type CityEvent, type CityPolicy, type EventChoice, type FurnitureKind, type GameState, type Interaction, type PrisonActivity, type PrisonFacility, type PrisonRegime, type PrisonService, type PrisonSlot, type PrisonStaff, type Resident, type SkillKind, type SocialAction, type Speed, type Tool } from './types';
 import { GameUpdater, type UpdateState } from './updater';
 import { getTransitNetwork } from './transit';
+import { PRISON_FACILITIES, PRISON_STAFF, PRISON_SLOTS, PRISON_ACTIVITIES, PRISON_SERVICES, getPrisonOperations } from './prison';
 
 export interface UIActions {
   tool: (tool: Tool) => void;
@@ -18,6 +19,11 @@ export interface UIActions {
   socialize: (action: SocialAction, id: number) => void;
   prisonRegime: (regime: PrisonRegime) => void;
   prisonIntake: (enabled: boolean) => void;
+  prisonFacility: (id: number, kind: PrisonFacility) => void;
+  prisonStaff: (id: number, role: PrisonStaff, count: number) => void;
+  prisonSchedule: (id: number, slot: PrisonSlot, activity: PrisonActivity) => void;
+  prisonService: (id: number, kind: PrisonService) => void;
+  focusPrison: (id: number) => void;
   upgrade: (id: number) => void;
   career: (track: CareerTrack) => void;
   policy: (policy: CityPolicy, enabled: boolean) => void;
@@ -78,7 +84,7 @@ const esc = (value: unknown) => String(value).replace(/[&<>"']/g, s => ({'&':'&a
 const number = (n: number) => Math.round(n).toLocaleString('zh-CN');
 const pct = (n: number) => Math.min(100, Math.max(0, n));
 const categories = ['居住', '商业', '公共', '管理'] as const;
-const actionNames: Record<Interaction, string> = { talk:'打个招呼', eat:'吃顿热饭', rest:'回家休息', work:'开始工作', relax:'享受公园', adopt:'搬入新家', patrol:'参与巡逻', enter:'进入我的家', exit:'离开住宅', furniture:'使用附近家具', study:'参加学校进修', transit:'查看公交线路' };
+const actionNames: Record<Interaction, string> = { talk:'打个招呼', eat:'吃顿热饭', rest:'回家休息', work:'开始工作', relax:'享受公园', adopt:'搬入新家', patrol:'参与巡逻', enter:'进入我的家', exit:'离开住宅', furniture:'使用附近家具', study:'参加学校进修', transit:'查看公交线路', corrections:'矫正中心与现场服务' };
 const relationship = (n: number) => n < 20 ? '初次见面' : n < 35 ? '熟悉的邻居' : n < 70 ? '好朋友' : '亲密好友';
 const regimes: [PrisonRegime, string][] = [['balanced','均衡日常'],['rehabilitation','康复优先'],['strict','严格监管']];
 const prisonSchedule = [['06—08','早餐'],['08—12','劳动'],['12—16','课程'],['16—19','放风'],['19—06','休息']];
@@ -94,7 +100,10 @@ export class GameUI {
   private mode: CameraMode = 'city';
   private tool: Tool = 'select';
   private category: typeof categories[number] = '居住';
-  private drawer: 'manage' | 'menu' | 'help' | 'furniture' | 'contacts' | 'career' | 'journal' | 'transit' | null = null;
+  private drawer: 'manage' | 'menu' | 'help' | 'furniture' | 'contacts' | 'career' | 'journal' | 'transit' | 'prison' | null = null;
+  private prisonSiteId?: number;
+  private prisonSections = new Set<string>();
+  private prisonScroll = 0;
   private journalEventId?: number;
   private historyExpanded = false;
   private missionCollapsed = false;
@@ -138,6 +147,12 @@ export class GameUI {
     root.addEventListener('click', this.onClick);
     root.addEventListener('input', this.onInput);
     root.addEventListener('change', this.onChange);
+    root.addEventListener('toggle', event => {
+      const details = event.target as HTMLDetailsElement;
+      const section = details.dataset?.prisonSection;
+      if (section) { if (details.open) this.prisonSections.add(section); else this.prisonSections.delete(section); }
+    }, true);
+    root.querySelector('#drawer')!.addEventListener('scroll', () => { if (this.drawer === 'prison') this.prisonScroll = root.querySelector('#drawer')!.scrollTop; });
     root.addEventListener('pointerdown', e => { if ((e.target as HTMLElement).closest('button,input,.drawer,.inspector,.build-dock,.life-dock')) e.stopPropagation(); });
     window.addEventListener('keydown', e => {
       if (e.code !== 'Escape' || !this.drawer) return;
@@ -164,7 +179,7 @@ export class GameUI {
       case 'tool': this.actions.tool(data.tool as Tool); break;
       case 'category': this.category = data.category as typeof categories[number]; this.renderTools(); break;
       case 'speed': this.actions.speed(Number(data.speed) as Speed); break;
-      case 'drawer': this.drawer = this.drawer === data.drawer ? null : data.drawer as typeof this.drawer; this.confirming = false; this.renderDrawer(); this.renderMission(); break;
+      case 'drawer': if (data.drawer === 'prison' && this.drawer !== 'prison') { this.openPrison(data.id ? Number(data.id) : undefined); break; } this.drawer = this.drawer === data.drawer ? null : data.drawer as typeof this.drawer; this.confirming = false; this.renderDrawer(); this.renderMission(); break;
       case 'close-drawer': this.drawer = null; this.confirming = false; this.renderDrawer(); this.renderMission(); break;
       case 'mission': this.missionCollapsed = !this.missionCollapsed; this.renderMission(); break;
       case 'dismiss-tip': this.tipDismissed = true; this.root.querySelector<HTMLElement>('#onboarding')!.hidden = true; break;
@@ -175,6 +190,10 @@ export class GameUI {
       case 'social': this.actions.socialize(data.action as SocialAction, Number(data.id)); this.refreshContacts(); break;
       case 'prison-regime': this.actions.prisonRegime(data.regime as PrisonRegime); this.refreshManagement(); break;
       case 'prison-intake': this.actions.prisonIntake(!this.state?.prison.intake); this.refreshManagement(); break;
+      case 'prison-facility': this.actions.prisonFacility(Number(data.id), data.kind as PrisonFacility); this.refreshPrison(); break;
+      case 'prison-staff': this.actions.prisonStaff(Number(data.id), data.role as PrisonStaff, Number(data.count)); this.refreshPrison(); break;
+      case 'prison-service': this.actions.prisonService(Number(data.id), data.kind as PrisonService); this.refreshPrison(); break;
+      case 'focus-prison': this.actions.focusPrison(Number(data.id)); break;
       case 'upgrade': this.actions.upgrade(Number(data.id)); break;
       case 'career': this.actions.career(data.track as CareerTrack); this.refreshCareer(); break;
       case 'policy': this.actions.policy(data.policy as CityPolicy, !this.state?.civic.policies[data.policy as CityPolicy]); this.refreshManagement(); break;
@@ -233,6 +252,8 @@ export class GameUI {
 
   private onChange = (event: Event) => {
     const input = event.target as HTMLInputElement;
+    if (input.dataset.ui === 'prison-site') { this.prisonSiteId = Number(input.value); this.refreshPrison(); return; }
+    if (input.dataset.ui === 'prison-schedule') { this.actions.prisonSchedule(Number(input.dataset.id), input.dataset.slot as PrisonSlot, input.value as PrisonActivity); this.refreshPrison(); return; }
     if (input.id !== 'import-save-input') return;
     const file = input.files?.[0];
     input.value = '';
@@ -309,6 +330,7 @@ export class GameUI {
     if (this.drawer === 'career') this.refreshCareer();
     if (this.drawer === 'journal') this.refreshJournal();
     if (this.drawer === 'transit') this.refreshTransit();
+    if (this.drawer === 'prison') this.refreshPrison();
     this.refreshJourney();
     if (modeChanged && !this.tipDismissed) this.text('tip-copy', mode === 'city' ? '从一条道路、一间小屋开始，也可以按 2 走进这座城。' : 'WASD 移动，右键拖动环顾。靠近建筑或居民，按 F 互动。');
     const notices = state.notices.filter(n => n.id > this.lastNotice);
@@ -345,7 +367,7 @@ export class GameUI {
 
   private renderInspector() {
     const el = this.root.querySelector<HTMLElement>('#inspector')!;
-    el.hidden = !this.selected || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'contacts' || this.drawer === 'furniture' || this.drawer === 'career' || this.drawer === 'journal' || this.drawer === 'transit';
+    el.hidden = !this.selected || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'contacts' || this.drawer === 'furniture' || this.drawer === 'career' || this.drawer === 'journal' || this.drawer === 'transit' || this.drawer === 'prison';
     if (!this.selected || !this.state) { this.cache.delete('inspector-content'); return; }
     const selected = this.selected;
     let html = '';
@@ -365,6 +387,7 @@ export class GameUI {
       html = `<div class="inspect-overline">${icon('person')}<span>栖湾居民</span><span class="status-dot online"></span><small>${esc(selected.activity)}</small></div><div class="resident-profile"><div class="profile-avatar" style="--resident-color:${esc(selected.color)}">${icon('person')}</div><div><h2>${esc(selected.name)}</h2><p>${selected.jobId ? '有一份稳定的工作' : '正在寻找生活的可能'}</p></div></div><div class="inspect-facts"><div><span>心情</span><strong>${Math.round(selected.mood)} / 100</strong></div><div><span>彼此关系</span><strong>${relationship(selected.relation)} · ${Math.round(selected.relation)}</strong></div></div><div class="relation-track"><i style="width:${pct(selected.relation)}%"></i></div><button class="primary-button" data-ui="interact" data-action="talk" data-id="${selected.id}">${icon('talk')}和 ${esc(selected.name)} 打个招呼</button><div class="social-actions"><button data-ui="social" data-action="chat" data-id="${selected.id}" title="聊聊近况 · 关系 +18">${icon('talk')}聊近况</button><button data-ui="social" data-action="compliment" data-id="${selected.id}" title="真诚赞美 · 关系 +12">${icon('smile')}赞美</button><button data-ui="social" data-action="gift" data-id="${selected.id}" title="小小心意 · 个人 ¥25 · 关系 +25" ${this.state.player.money < 25 ? 'disabled' : ''}>${icon('heart')}礼物 <small>¥25</small></button></div><button class="secondary-button" data-ui="social" data-action="invite" data-id="${selected.id}" ${!canInvite ? 'disabled' : ''}>${icon('home')}${this.state.interior?.guestId === selected.id ? 'TA 正在家中做客' : '邀请来家里坐坐'}</button><p class="social-note">${canInvite ? '在屋内可邀请朋友到访。' : '关系达到 35 后，回到自己的屋内即可邀请。'}室外交谈请先走近。</p><button class="secondary-button" data-ui="follow" data-id="${selected.id}">${icon('focus')}看看 TA 的生活</button><p class="inspect-description" style="margin-top:12px">城市视角下，右键点击地面可指挥 TA 沿街道移动。</p>`;
     }
     if ('kind' in selected && selected.kind === 'busstop') html += `<button class="primary-button transit-inspect-button" data-ui="drawer" data-drawer="transit">${icon('bus')}查看公交线路与乘车</button>`;
+    if ('kind' in selected && selected.kind === 'prison') html += `<button class="secondary-button prison-inspect-button" data-ui="drawer" data-drawer="prison" data-id="${selected.id}" title="配置这栋中心的设施、员工与作息 · C">${icon('lock')}管理与现场服务 ${icon('chevron')}</button>`;
     if (this.cache.get('inspector-content') !== html) { el.innerHTML = html; this.cache.set('inspector-content', html); }
   }
 
@@ -378,6 +401,7 @@ export class GameUI {
     el.classList.toggle('journal-drawer', this.drawer === 'journal');
     el.classList.toggle('menu-drawer', this.drawer === 'menu');
     el.classList.toggle('transit-drawer', this.drawer === 'transit');
+    el.classList.toggle('prison-drawer', this.drawer === 'prison');
     this.root.dataset.drawer = this.drawer || '';
     this.root.querySelector('.event-chip')!.setAttribute('aria-expanded', String(this.drawer === 'journal'));
     this.cache.delete('inspector-content');
@@ -391,6 +415,7 @@ export class GameUI {
       budgetLines.querySelector('div:nth-child(2)>span')!.textContent = '城市总支出';
       budgetLines.insertAdjacentHTML('beforeend', `<div class="budget-transit"><span>其中 · 公交票务</span><strong id="budget-transit-income">—</strong></div><div class="budget-transit"><span>其中 · 公交运营与维护</span><strong id="budget-transit-expenses">—</strong></div>`);
       el.insertAdjacentHTML('beforeend', `<div class="management-section transit-management"><h3>公共交通</h3><div class="transit-management-stats"><div><small>居民覆盖</small><strong id="management-transit-coverage">—</strong></div><div><small>每日乘次</small><strong id="management-transit-riders">—</strong></div></div><p>票务与公交运营、站点维护已包含在城市收支合计中。</p><button class="secondary-button" data-ui="drawer" data-drawer="transit">${icon('bus')}线路、票价与乘车 ${icon('chevron')}</button></div>`);
+      el.querySelector('#city-security')!.closest('.management-section')!.insertAdjacentHTML('beforeend', `<button class="secondary-button prison-manage-entry" data-ui="drawer" data-drawer="prison" title="逐栋配置设施、员工与作息 · C">${icon('lock')}管理矫正中心 <kbd>C</kbd>${icon('chevron')}</button><p class="prison-accounting-note" id="management-prison-accounting"></p>`);
       this.refreshManagement();
     } else if (this.drawer === 'furniture') {
       el.innerHTML = `${header('MAKE YOURSELF AT HOME', '慢慢，布置一个家')}<div class="drawer-wallet"><span>个人钱包</span><strong id="furniture-wallet">—</strong></div><p class="furniture-intro">家具会摆在房间的固定位置。走到旁边，按 <kbd>F</kbd> 或点击使用；出售返还一半购置费用。</p><div id="furniture-list" class="furniture-list"></div>`;
@@ -404,6 +429,8 @@ export class GameUI {
     } else if (this.drawer === 'journal') {
       el.innerHTML = `${header('LIFE HAPPENS HERE', '城市事件')}<div class="journal-overview"><span>每一个选择，都让城市继续生长。</span><small id="journal-summary"></small></div><div id="journal-active"></div><div id="journal-history"></div><p class="journal-footnote">阅读手记时城市时间暂停。需要亲自参与的活动，请先关闭面板，走到事件地点附近。</p>`;
       this.refreshJournal();
+    } else if (this.drawer === 'prison') {
+      this.renderPrisonDrawer(el, header('A CHANCE TO BEGIN AGAIN', '矫正中心'));
     } else if (this.drawer === 'transit') {
       el.innerHTML = `${header('THE CITY, A LITTLE CLOSER', '公共交通')}<p class="transit-intro">从一个街区，去往另一个日常。<br/>把至少两座车站接入同一道路网络，公交便会沿路运行。</p><div class="transit-operations"><div><strong>公交运营</strong><span id="transit-operating-label"></span></div><button class="transit-toggle" data-ui="transit-enabled" aria-pressed="false" aria-label="公交运营开关"><i></i><span id="transit-toggle-label"></span></button></div><div class="transit-fare"><div><span>单次票价</span><small>从个人钱包支付</small></div><div class="transit-fare-options" role="group" aria-label="选择公交票价">${[2,4,6].map(fare => `<button data-ui="transit-fare" data-fare="${fare}" aria-pressed="false">¥ ${fare}</button>`).join('')}</div></div><div class="transit-stat-grid"><div><small>居民覆盖</small><strong id="transit-coverage">—</strong></div><div><small>每日乘次</small><strong id="transit-riders">—</strong></div><div><small>每日票务收入</small><strong id="transit-income">—</strong></div><div><small>每日运营与维护</small><strong id="transit-expenses">—</strong></div></div><p class="transit-accounting">每日票务为居民客流预测。你的车费在上车时另记一次；运营与维护已计入城市总支出。</p><section class="transit-destinations"><div class="transit-section-heading"><h3>沿途与目的地</h3><span id="transit-stop-count"></span></div><div id="transit-boarding"></div><div id="transit-stops"></div></section><p class="transit-footnote">按 <kbd>T</kbd> 查看公交。户外走近运营站点 18 米内，再选择同一路网的目的地。阅读线路时城市暂停，乘车行程会继续。</p>`;
       this.refreshTransit();
@@ -415,6 +442,7 @@ export class GameUI {
     }
     if (this.drawer === 'menu') el.querySelector('.update-panel')!.insertAdjacentHTML('beforebegin', `<section class="save-transfer"><h3>城市备份</h3><p>把城市随身带走，或从备份继续生活。<br/>导入会替换当前城市，建议先导出备份。</p><div><button data-ui="export-save">${icon('save')}导出备份</button><button data-ui="import-save">${icon('load')}导入备份</button></div><small>选择本地 JSON 备份文件，最大 2 MB。</small></section>`);
     if (this.drawer === 'help') el.insertAdjacentHTML('beforeend', `<div class="help-group help-progression"><h3>成长与城市事件</h3><p><kbd>J</kbd><span>打开城市事件手记</span></p><div class="help-footer">从生活底栏打开「职业与技能」，选择职业方向。工作积累经验，阅读、烹饪和社交提升技能；升级会带来更好的收入。<br/>城市中的事件标记可点击查看。学校支持进修，消防站帮助应对火情。</div></div><div class="help-group help-transit"><h3>沿街道，去更远的日常</h3><p><kbd>T</kbd><span>公交线路、运营与目的地</span></p><div class="help-footer">在公共服务中建造车站，至少两站接入同一道路网络即可运营。户外走到运营车站 18 米内，打开公交选择目的地；乘车按单次票价扣个人资金，途中可以切换视角。</div><h3>把城市带在身边</h3><div class="help-footer">游戏菜单提供「导出备份」与「导入备份」。导入前先保存一份当前城市，确认后会用所选备份替换城市。</div></div>`);
+    if (this.drawer === 'help') el.insertAdjacentHTML('beforeend', `<div class="help-group help-corrections"><h3>让重新开始，成为可能</h3><p><kbd>C</kbd><span>矫正中心管理与现场服务</span></p><div class="help-footer">每栋中心独立配置康复教室、职业工坊、医疗室、员工与三个作息时段；配置影响实际康复、安全和每日收支。接收与管理制度仍在「城市管理」统一调整。<br/>切换居民视角，户外走近运营中心 20 米内，可亲自辅导；在有康复教室的课程时段还可授课。现场服务消耗精力，由市政支付个人工资，每栋中心有独立冷却。</div></div>`);
     this.renderInspector();
   }
 
@@ -459,6 +487,8 @@ export class GameUI {
     const slider = this.root.querySelector<HTMLInputElement>('#tax-slider');
     if (slider && document.activeElement !== slider) { slider.value = String(this.state.tax); set('tax-label', `${this.state.tax}%`); }
     const prison = this.state.prison;
+    const operations = getPrisonOperations(this.state);
+    set('management-prison-accounting', `全市 ${operations.sites.length} 栋中心 · 设施与员工 ¥${number(operations.totalExpenses)}/日 · 工坊 +¥${number(operations.workIncome)}/日，均已计入城市总收支。`);
     set('prison-intake-label', prison.intake ? '接收开启' : '暂停接收');
     const intake = this.root.querySelector<HTMLButtonElement>('[data-ui="prison-intake"]');
     if (intake) { intake.classList.toggle('active', prison.intake); intake.setAttribute('aria-pressed', String(prison.intake)); }
@@ -478,6 +508,118 @@ export class GameUI {
       button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
       button.title = `${active ? '关闭' : '启用'}${CITY_POLICIES[button.dataset.policy as CityPolicy].name}`;
     });
+  }
+
+  private renderPrisonDrawer(el: HTMLElement, header: string) {
+    const details = (section: string, title: string, body: string) => `<details class="prison-section" data-prison-section="${section}" ${this.prisonSections.has(section) ? 'open' : ''}><summary><span>${title}</span><small id="prison-${section}-summary"></small>${icon('chevron')}</summary><div class="prison-section-body">${body}</div></details>`;
+    const facilities = (Object.keys(PRISON_FACILITIES) as PrisonFacility[]).map(kind => {
+      const def = PRISON_FACILITIES[kind];
+      return `<article class="prison-facility" data-facility="${kind}"><div class="prison-item-heading"><span class="prison-item-icon">${icon(def.icon)}</span><div><h3>${def.name}</h3><small id="prison-facility-level-${kind}"></small></div><span class="prison-level-dots" id="prison-facility-dots-${kind}" aria-hidden="true"></span></div><p>${esc(def.description)}</p><div class="prison-item-foot"><small id="prison-facility-upkeep-${kind}"></small><button data-ui="prison-facility" data-kind="${kind}"><span id="prison-facility-label-${kind}">购置设施</span><strong id="prison-facility-cost-${kind}"></strong></button></div><small class="prison-action-reason" id="prison-facility-reason-${kind}"></small></article>`;
+    }).join('');
+    const staff = (Object.keys(PRISON_STAFF) as PrisonStaff[]).map(role => {
+      const def = PRISON_STAFF[role];
+      return `<article class="prison-staff-row"><div class="prison-staff-heading"><h3>${def.name}</h3><small>¥ ${def.wage} / 人·日</small></div><p>${esc(def.description)}</p><div class="prison-staff-foot"><small id="prison-staff-cost-${role}"></small><div class="prison-stepper" role="group" aria-label="调整${def.name}人数"><button data-ui="prison-staff" data-role="${role}" data-delta="-1" aria-label="减少一名${def.name}">−</button><output id="prison-staff-count-${role}" aria-label="${def.name}人数"></output><button data-ui="prison-staff" data-role="${role}" data-delta="1" aria-label="增加一名${def.name}">+</button></div></div></article>`;
+    }).join('');
+    const operatingEffect = `<div class="prison-current-effect"><span>当前设施与作息影响</span><p><span>康复 <strong id="prison-site-rehab-rate"></strong></span><span>不安 <strong id="prison-site-unrest-rate"></strong></span></p><small>每游戏小时的增量；全市管理制度另行生效。</small></div>`;
+    const schedule = (Object.keys(PRISON_SLOTS) as PrisonSlot[]).map(slot => {
+      const def = PRISON_SLOTS[slot];
+      return `<div class="prison-schedule-row" data-prison-slot="${slot}"><label for="prison-slot-${slot}"><span>${def.name}</span><small>${String(def.start).padStart(2,'0')}:00—${String(def.end).padStart(2,'0')}:00</small></label><select id="prison-slot-${slot}" data-ui="prison-schedule" data-slot="${slot}" aria-label="${def.name}活动">${(Object.keys(PRISON_ACTIVITIES) as PrisonActivity[]).map(activity => `<option value="${activity}">${PRISON_ACTIVITIES[activity].name}</option>`).join('')}</select></div><p class="prison-slot-effect" id="prison-slot-effect-${slot}"></p>`;
+    }).join('');
+    const services = (Object.keys(PRISON_SERVICES) as PrisonService[]).map(kind => {
+      const def = PRISON_SERVICES[kind];
+      return `<article class="prison-service"><div class="prison-service-heading">${icon(kind === 'teach' ? 'help' : 'talk')}<h3>${def.name}</h3><strong>+ ¥ ${def.wage}</strong></div><p>${esc(def.description)}</p><div class="prison-service-effects"><span>精力 −${def.energy}</span><span>${skillInfo[def.skill].name} +${def.skillXP} XP</span><span>康复 +${def.rehabilitation}</span><span>不安 ${def.unrest}</span></div><button class="prison-service-button" data-ui="prison-service" data-kind="${kind}">${icon('arrow')}<span>${def.name}</span></button><small class="prison-action-reason" id="prison-service-reason-${kind}"></small></article>`;
+    }).join('');
+    el.innerHTML = `${header}<p class="prison-intro">更好的日常，也是一条回归的路。<br/>每栋中心都有自己的设施、团队和生活安排。</p><div class="prison-site-picker"><label for="prison-site">选择矫正中心</label><div><select id="prison-site" data-ui="prison-site" aria-label="选择矫正中心"></select><button class="icon-button" data-ui="focus-prison" aria-label="定位这栋矫正中心" title="关闭面板并定位这栋中心">${icon('focus')}</button></div></div><div id="prison-empty" class="prison-empty" hidden>${icon('lock')}<strong>给重新开始，留一个地方。</strong><p>在「城市管理」建筑分类中建造矫正中心，接入道路与水电后便可运营。</p></div><div id="prison-config"><div class="prison-site-status"><i id="prison-site-status-dot"></i><strong id="prison-site-status"></strong><span id="prison-site-phase"></span></div><div class="prison-overview"><div><small>本栋在押 / 容量</small><strong id="prison-site-prisoners"></strong></div><div><small>可保障收押床位</small><strong id="prison-site-intake"></strong></div><div><small>狱警覆盖</small><strong id="prison-site-guards"></strong></div><div><small>运营效能</small><strong id="prison-site-effectiveness"></strong></div></div><div class="prison-finance"><div><span>设施与员工</span><strong id="prison-site-expenses"></strong></div><div><span>工坊收入</span><strong id="prison-site-income"></strong></div><p>每日预测，已包含在城市总收支中。建筑维护与照护费用另含于城市总支出。</p></div>${details('facilities','设施与康复空间',facilities)}${details('staff','员工与照护',staff)}${details('schedule','每日生活安排',`${operatingEffect}<p class="prison-section-note">每栋中心独立安排；当前时段以绿色标记。早餐 06—08、夜间休息固定。</p>${schedule}`)}${details('services','我也能参与的日常',`<p class="prison-section-note" id="prison-service-location"></p>${services}<p class="prison-section-note" id="prison-service-visits"></p>`)}<p class="prison-footnote"><kbd>C</kbd> 查看管理。统一接收与管理制度可在「城市管理」调整。阅读时城市暂停，现场服务成功后继续生活。</p></div>`;
+    this.refreshPrison();
+    el.scrollTop = this.prisonScroll;
+  }
+
+  openPrison(id?: number) {
+    const selected = this.selected && 'kind' in this.selected && this.selected.kind === 'prison' ? this.selected.id : undefined;
+    this.prisonSiteId = id ?? selected ?? this.prisonSiteId;
+    this.drawer = 'prison'; this.confirming = false;
+    this.renderDrawer(); this.renderMission();
+  }
+
+  private refreshPrison() {
+    if (this.drawer !== 'prison' || !this.state) return;
+    const state = this.state, operations = getPrisonOperations(state);
+    const set = (id: string, value: string) => { const el = this.root.querySelector<HTMLElement>(`#${id}`); if (el && el.textContent !== value) el.textContent = value; };
+    if (!operations.sites.some(site => site.buildingId === this.prisonSiteId)) this.prisonSiteId = operations.sites.find(site => site.operational)?.buildingId ?? operations.sites[0]?.buildingId;
+    const site = operations.sites.find(site => site.buildingId === this.prisonSiteId);
+    const selector = this.root.querySelector<HTMLSelectElement>('#prison-site')!;
+    const optionsKey = operations.sites.map(site => `${site.buildingId}:${site.gx}:${site.gz}:${site.status}`).join('|');
+    if (selector.dataset.optionsKey !== optionsKey && document.activeElement !== selector) {
+      selector.innerHTML = operations.sites.map(site => `<option value="${site.buildingId}">矫正中心 · ${site.gx + 1}-${site.gz + 1} · ${esc(site.status)}</option>`).join('') || '<option value="">尚未建造矫正中心</option>';
+      selector.dataset.optionsKey = optionsKey;
+    }
+    selector.disabled = !site;
+    if (site && document.activeElement !== selector) selector.value = String(site.buildingId);
+    this.root.querySelector<HTMLElement>('#prison-empty')!.hidden = Boolean(site);
+    this.root.querySelector<HTMLElement>('#prison-config')!.hidden = !site;
+    const focus = this.root.querySelector<HTMLButtonElement>('[data-ui="focus-prison"]')!;
+    focus.disabled = !site; focus.dataset.id = site ? String(site.buildingId) : '';
+    if (!site) return;
+    const id = String(site.buildingId);
+    const signed = (rate: number) => `${rate > 0 ? '+' : rate < 0 ? '−' : ''}${Math.abs(rate).toFixed(2)} / 时`;
+    set('prison-site-status', site.status);
+    this.root.querySelector('#prison-site-status-dot')!.classList.toggle('active', site.operational);
+    set('prison-site-phase', `现在 · ${site.phase}`);
+    set('prison-site-prisoners', `${site.prisoners} / ${site.capacity}`);
+    set('prison-site-intake', `${site.intakeCapacity} 床`);
+    set('prison-site-guards', `${Math.round(site.guardCoverage * 100)}%`);
+    set('prison-site-effectiveness', `${Math.round(site.effectiveness * 100)}%`);
+    set('prison-site-expenses', `− ¥ ${number(site.expenses)} / 日`);
+    set('prison-site-income', `+ ¥ ${number(site.workIncome)} / 日`);
+    set('prison-site-rehab-rate', signed(site.rehabilitationRate));
+    set('prison-site-unrest-rate', signed(site.unrestRate));
+    set('prison-facilities-summary', `${Object.values(site.facilities).reduce((sum, level) => sum + level, 0)} / ${Object.values(PRISON_FACILITIES).reduce((sum, def) => sum + def.maxLevel, 0)} 级`);
+    set('prison-staff-summary', `${site.guards + site.counselors} 人`);
+    set('prison-schedule-summary', site.phase);
+    const wait = Math.max(0, Math.ceil(site.nextServiceAt - state.elapsed));
+    set('prison-services-summary', wait ? `${wait} 秒后可服务` : '现场参与');
+    for (const kind of Object.keys(PRISON_FACILITIES) as PrisonFacility[]) {
+      const def = PRISON_FACILITIES[kind], level = site.facilities[kind], cost = def.cost * (level + 1), max = level >= def.maxLevel;
+      set(`prison-facility-level-${kind}`, level ? `已配备 · Lv. ${level} / ${def.maxLevel}` : '尚未配备');
+      const dots = this.root.querySelector<HTMLElement>(`#prison-facility-dots-${kind}`)!;
+      if (dots.dataset.level !== String(level)) { dots.innerHTML = Array.from({length:def.maxLevel}, (_,i) => `<i class="${i < level ? 'filled' : ''}"></i>`).join(''); dots.dataset.level = String(level); }
+      set(`prison-facility-upkeep-${kind}`, `维护 ¥${level * def.upkeep} / 日${max ? '' : ` · 下级 +¥${def.upkeep}`}`);
+      set(`prison-facility-label-${kind}`, max ? '已达满级' : level ? `升级至 Lv. ${level + 1}` : '购置设施');
+      set(`prison-facility-cost-${kind}`, max ? 'MAX' : `¥ ${number(cost)}`);
+      const button = this.root.querySelector<HTMLButtonElement>(`[data-ui="prison-facility"][data-kind="${kind}"]`)!;
+      button.dataset.id = id; button.disabled = max || state.money < cost;
+      button.title = max ? `${def.name}已达到最高等级` : `${def.name} · 市政 ¥${number(cost)}`;
+      set(`prison-facility-reason-${kind}`, !max && state.money < cost ? `市政资金不足，还需 ¥${number(cost - state.money)}。` : '');
+    }
+    for (const role of Object.keys(PRISON_STAFF) as PrisonStaff[]) {
+      const def = PRISON_STAFF[role], count = role === 'guards' ? site.guards : site.counselors;
+      set(`prison-staff-count-${role}`, String(count));
+      set(`prison-staff-cost-${role}`, `工资 ¥${number(count * def.wage)} / 日`);
+      this.root.querySelectorAll<HTMLButtonElement>(`[data-ui="prison-staff"][data-role="${role}"]`).forEach(button => {
+        const next = count + Number(button.dataset.delta);
+        button.dataset.id = id; button.dataset.count = String(next); button.disabled = next < 0 || next > def.maxCount;
+      });
+    }
+    for (const slot of Object.keys(PRISON_SLOTS) as PrisonSlot[]) {
+      const def = PRISON_SLOTS[slot], activity = site.schedule[slot];
+      const select = this.root.querySelector<HTMLSelectElement>(`[data-ui="prison-schedule"][data-slot="${slot}"]`)!;
+      select.dataset.id = id;
+      if (document.activeElement !== select) select.value = activity;
+      const current = state.hour >= def.start && state.hour < def.end;
+      select.closest('.prison-schedule-row')!.classList.toggle('active', current);
+      if (current) select.setAttribute('aria-description', '当前时段'); else select.removeAttribute('aria-description');
+      set(`prison-slot-effect-${slot}`, PRISON_ACTIVITIES[activity].description);
+    }
+    const distance = Math.hypot(state.player.x - cellToWorld(site.gx), state.player.z - cellToWorld(site.gz));
+    set('prison-service-location', state.interior ? '先离开住宅，再走到这栋中心 20 米内。' : this.mode === 'city' ? '切换居民生活或第一人称，走到这栋中心 20 米内。' : `距这栋中心约 ${Math.round(distance)} 米 · 服务须在户外 20 米内。`);
+    set('prison-service-visits', `本栋累计现场服务 ${site.serviceVisits} 次。每次服务消耗精力，由市政支付个人工资；冷却按模拟秒计算，关闭面板后继续计时。`);
+    for (const kind of Object.keys(PRISON_SERVICES) as PrisonService[]) {
+      const def = PRISON_SERVICES[kind];
+      const reason = this.mode === 'city' ? '先切换到居民生活或第一人称。' : state.interior ? '请先离开住宅。' : state.transit.journey ? '到站后才能参与服务。' : !site.operational ? `中心暂不可服务：${site.status}。` : distance > 20 ? '请先走到这栋中心 20 米内。' : !site.prisoners ? '这栋中心暂时没有在押人员。' : wait ? `请先继续生活，${wait} 秒后可再次服务。` : state.player.energy < def.energy ? `需要至少 ${def.energy} 点精力，先休息一下。` : state.money < def.wage ? `市政资金不足以支付 ¥${def.wage} 服务工资。` : def.facility && !site.facilities[def.facility] ? `请先配备${PRISON_FACILITIES[def.facility].name}。` : def.activity && site.activity !== def.activity ? `需要在本栋「${PRISON_ACTIVITIES[def.activity].name}」时段参与。` : '';
+      const button = this.root.querySelector<HTMLButtonElement>(`[data-ui="prison-service"][data-kind="${kind}"]`)!;
+      button.dataset.id = id; button.disabled = Boolean(reason); button.title = reason || `${def.name} · 个人收入 ¥${def.wage} · 精力 −${def.energy}`;
+      set(`prison-service-reason-${kind}`, reason || `已准备好 · 完成后本栋冷却 ${def.cooldown} 秒。`);
+    }
   }
 
   openTransit() {
@@ -698,7 +840,7 @@ export class GameUI {
   }
 
   isModalOpen() { return this.drawer !== null; }
-  isSimulationPaused() { return (this.drawer === 'transit' && !this.state?.transit.journey) || this.drawer === 'manage' || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'career' || this.drawer === 'journal'; }
+  isSimulationPaused() { return ((this.drawer === 'transit' || this.drawer === 'prison') && !this.state?.transit.journey) || this.drawer === 'manage' || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'career' || this.drawer === 'journal'; }
 
   private drawMap() {
     if (!this.state) return;

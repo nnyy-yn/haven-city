@@ -218,7 +218,7 @@ test('mid-journey saves resume from canonical roads without charging or creditin
   assert.equal(loaded.state.player.money, wallet);
 });
 
-test('versions one, two and three migrate to schema four without losing wallet, city or progression', () => {
+test('versions one, two and three migrate to the current schema without losing wallet, city or progression', () => {
   for (const version of [1, 2, 3]) {
     const legacy = copy(new Simulation().state) as GameState & Record<string, unknown>;
     legacy.version = version; legacy.money = 12345; legacy.player.money = 777;
@@ -227,7 +227,7 @@ test('versions one, two and three migrate to schema four without losing wallet, 
     if (version < 3) { delete legacy.progression; delete legacy.civic; }
     if (version < 2) { delete legacy.homes; delete legacy.interior; delete legacy.prison; delete legacy.player.hygiene; }
     const loaded = new Simulation(legacy);
-    assert.equal(loaded.state.version, 4); assert.equal(loaded.state.money, 12345); assert.equal(loaded.state.player.money, 777);
+    assert.equal(loaded.state.version, 5); assert.equal(loaded.state.money, 12345); assert.equal(loaded.state.player.money, 777);
     assert.deepEqual(loaded.state.transit, { enabled: true, fare: 4, totalTrips: 0, journey: null });
     assert.equal(loaded.state.buildings.length, legacy.buildings.length);
     if (version === 3) assert.equal(loaded.state.progression.skills.logic, 110);

@@ -47,7 +47,7 @@ async function walkToStop(stop){
 }
 try{
   await page.goto(process.env.HAVEN_TEST_URL||'http://localhost:5175/',{waitUntil:'networkidle'});await page.waitForFunction(()=>!!window.__HAVEN__);await pause();
-  const seed=await state();check('schema four preserves the inhabited starter city',seed.version===4&&seed.buildings.length===143&&seed.transit.enabled&&seed.transit.fare===4);
+  const seed=await state();check('transit regression preserves the inhabited starter city',seed.version===5&&seed.buildings.length===143&&seed.transit.enabled&&seed.transit.fare===4);
   const initialView=await view();check('static scene batches reduce city draw calls',initialView.drawCalls<700,initialView);
   await page.keyboard.press('t');check('T opens the transport drawer',await page.locator('[data-ui="transit-enabled"]').isVisible());
   const frozen=await state();await page.waitForTimeout(200);check('route planning pauses the simulation',(await state()).elapsed===frozen.elapsed);
@@ -88,14 +88,14 @@ try{
   await page.locator('[aria-label="游戏菜单"]').click();await page.locator('[data-ui="save"]').click();
   const downloadPromise=page.waitForEvent('download');await page.locator('[data-ui="export-save"]').click();const download=await downloadPromise;
   const exported=JSON.parse(await readFile(await download.path(),'utf8'));
-  check('export produces a portable JSON backup of the actual city',exported.version===4&&exported.transit.totalTrips===1&&exported.buildings.filter(b=>b.kind==='busstop').length===2);
+  check('export produces a portable JSON backup of the actual city',exported.version===5&&exported.transit.totalTrips===1&&exported.buildings.filter(b=>b.kind==='busstop').length===2);
   const beforeInvalid=await state();await importFile('{invalid JSON');
   check('invalid backup leaves the current city and wallet intact',JSON.stringify(await state())===JSON.stringify(beforeInvalid));
   const future={...exported,version:99};await importFile(future);check('future backups are rejected without replacing progress',(await state()).player.money===beforeInvalid.player.money&&(await state()).transit.totalTrips===1);
   const legacy={...seed,version:3,player:{...seed.player,money:777}};delete legacy.transit;
   for(const key of ['transitCoverage','transitRiders','transitIncome','transitExpenses'])delete legacy.stats[key];
   await importFile(legacy,{accept:false});check('declining import preserves the existing city',(await state()).player.money===beforeInvalid.player.money);
-  await importFile(legacy);s=await state();check('version three backup migrates with its original progress',s.version===4&&s.player.money===777&&s.buildings.length===143&&s.transit.totalTrips===0);
+  await importFile(legacy);s=await state();check('version three backup migrates with its original progress',s.version===5&&s.player.money===777&&s.buildings.length===143&&s.transit.totalTrips===0);
   await page.locator('[aria-label="游戏菜单"]').click();await importFile(exported);s=await state();check('exported city restores both stations and the completed trip',s.transit.totalTrips===1&&s.player.money===exported.player.money&&s.buildings.length===exported.buildings.length);
   await page.reload({waitUntil:'networkidle'});await page.waitForFunction(()=>!!window.__HAVEN__);s=await state();check('successful import persists across a reload',s.transit.totalTrips===1&&s.player.money===exported.player.money);
   await page.setViewportSize({width:390,height:844});await page.keyboard.press('t');await snap('05-mobile-transport');

@@ -1,9 +1,10 @@
 import { BUILDINGS, CAREERS, CITY_EVENTS, CITY_POLICIES, FURNITURE, PRISON_RULES, GRID, cellToWorld, worldToCell, wageFor, xpLevel } from './types.ts';
-import type { ActionResult, Building, BuildingKind, CareerTrack, CityEffect, CityEventKind, CityPolicy, CityStats, EventChoice, FurnitureKind, GameState, HomeInterior, Interaction, Mission, PrisonRegime, Progression, Resident, SkillKind, SocialAction, Speed } from './types.ts';
+import type { ActionResult, Building, BuildingKind, CareerTrack, CityEffect, CityEventKind, CityPolicy, CityStats, EventChoice, FurnitureKind, GameState, HomeInterior, Interaction, Mission, PrisonActivity, PrisonFacility, PrisonRegime, PrisonService, PrisonSlot, PrisonStaff, Progression, Resident, SkillKind, SocialAction, Speed } from './types.ts';
 import { getTransitNetwork, getTransitPath, transitPathLength } from './transit.ts';
+import { createPrisonSite, getPrisonOperations, PRISON_ACTIVITIES, PRISON_FACILITIES, PRISON_SERVICES, PRISON_SLOTS, PRISON_STAFF } from './prison.ts';
 
 const SAVE_KEY = 'haven-city-save-v1';
-const VERSION = 4;
+const VERSION = 5;
 const STARTER_FURNITURE: FurnitureKind[] = ['bed', 'kitchen', 'sofa', 'shower', 'dining', 'plant'];
 const COLORS = ['#d88d61', '#668fa0', '#b68c9b', '#858f68', '#cdb26b', '#8d8db4', '#658b7c', '#c27d72'];
 const NAMES = ['林知夏', '陈望舒', '周屿', '许清和', '苏小满', '沈南风', '顾星河', '宋时雨', '叶晨', '陆一帆', '江晚', '温予安', '程嘉树', '夏可', '李思远', '唐晴', '何沐', '徐知行', '方悦', '吴桐', '赵宁', '谢川', '郑岚', '梁初', '白舟', '孟秋', '孙墨', '蔡明', '季然', '秦月', '韩松', '朱禾'];
@@ -52,8 +53,6 @@ export class Simulation {
   private roadMap = new Map<string, Building>();
   private hourlyClock = 0;
   private arrivals = 0;
-  private arrests = 0;
-  private releases = 0;
   private patrolBonus = 0;
 
   constructor(saved?: GameState) {
@@ -116,6 +115,7 @@ export class Simulation {
       stats: this.emptyStats(), missions, notices: [{ id: id++, text: '欢迎来到栖湾！建设城市，或切换生活视角认识你的邻居。', kind: 'info', time: 0 }],
       nextId: id, elapsed: 0, weather: '晴朗', homes: [], interior: null,
       prison: { intake: true, regime: 'balanced', unrest: 8, rehabilitation: 40, released: 0, phase: '劳动' },
+      corrections: { sites: [], intakeProgress: 0, releaseProgress: 0 },
       progression: freshProgression(), civic: { policies: { green: false, education: false, community: false }, events: [event], effects: [], nextEventAt: 60, sequence: 0, resolved: 0 },
       transit: { enabled: true, fare: 4, totalTrips: 0, journey: null } };
   }
@@ -184,6 +184,7 @@ export class Simulation {
     this.state.money -= def.cost;
     const building = { id: this.state.nextId++, kind, gx, gz, level: 1, active: true };
     this.state.buildings.push(building);
+    if (kind === 'prison') this.state.corrections.sites.push(createPrisonSite(building.id));
     this.rebuildRoadMap();
     this.refreshConnections();
     this.reconcileJourney();
@@ -203,6 +204,7 @@ export class Simulation {
     this.state.money += refund;
     if (this.state.player.homeId === b.id) this.state.player.homeId = null;
     this.state.homes = this.state.homes.filter(home => home.homeId !== b.id);
+    this.state.corrections.sites = this.state.corrections.sites.filter(site => site.buildingId !== b.id);
     for (const event of this.state.civic.events) if (event.buildingId === b.id) {
       event.buildingId = null;
       if (event.status === 'pending') { event.status = 'expired'; event.choice = null; }
@@ -513,6 +515,67 @@ export class Simulation {
     return this.result(true, enabled ? '已开放矫正中心收押。' : '已暂停新增收押，现有人员继续服刑与康复。');
   }
 
+  upgradePrisonFacility(buildingId: number, kind: PrisonFacility): ActionResult {
+    if (!ownKey(PRISON_FACILITIES, kind)) return this.result(false, '未知的矫正设施。');
+    const site = this.state.corrections.sites.find(s => s.buildingId === buildingId);
+    if (!site) return this.result(false, '请选择一座仍存在的矫正中心。');
+    const def = PRISON_FACILITIES[kind];
+    if (site.facilities[kind] >= def.maxLevel) return this.result(false, '这项矫正设施已经达到最高等级 2。');
+    const cost = def.cost * (site.facilities[kind] + 1);
+    if (this.state.money < cost) return this.result(false, `采购${def.name}需要市政资金 ¥${cost}。`);
+    this.state.money -= cost;
+    site.facilities[kind]++;
+    this.updateStats();
+    return this.result(true, `${def.name}已提升至 ${site.facilities[kind]} 级，市政支出 ¥${cost}。`);
+  }
+
+  setPrisonStaff(buildingId: number, role: PrisonStaff, count: number): ActionResult {
+    if (!ownKey(PRISON_STAFF, role) || !Number.isInteger(count) || count < 0 || count > PRISON_STAFF[role].maxCount) return this.result(false, '岗位人数应为 0 至 8 的整数。');
+    const site = this.state.corrections.sites.find(s => s.buildingId === buildingId);
+    if (!site) return this.result(false, '请选择一座仍存在的矫正中心。');
+    site.staff[role] = count;
+    this.updateStats();
+    return this.result(true, `${PRISON_STAFF[role].name}已配置 ${count} 人，每日工资 ¥${count * PRISON_STAFF[role].wage}。`);
+  }
+
+  setPrisonSchedule(buildingId: number, slot: PrisonSlot, activity: PrisonActivity): ActionResult {
+    if (!ownKey(PRISON_SLOTS, slot) || !ownKey(PRISON_ACTIVITIES, activity)) return this.result(false, '未知的矫正作息时段或活动。');
+    const site = this.state.corrections.sites.find(s => s.buildingId === buildingId);
+    if (!site) return this.result(false, '请选择一座仍存在的矫正中心。');
+    site.schedule[slot] = activity;
+    this.updatePrison(0); this.updateStats();
+    return this.result(true, `${PRISON_SLOTS[slot].name}已安排「${PRISON_ACTIVITIES[activity].name}」。`);
+  }
+
+  servePrison(buildingId: number, kind: PrisonService): ActionResult {
+    if (!ownKey(PRISON_SERVICES, kind)) return this.result(false, '未知的矫正服务。');
+    if (this.state.interior || this.state.transit.journey) return this.result(false, '请先走出住宅或等待公交到站，再参与矫正服务。');
+    const site = this.state.corrections.sites.find(s => s.buildingId === buildingId);
+    const operation = getPrisonOperations(this.state).sites.find(s => s.buildingId === buildingId);
+    if (!site || !operation?.operational) return this.result(false, '中心需要接通道路、保证水电并配备狱警，才能开展服务。');
+    if (!operation.prisoners) return this.result(false, '这座中心暂时没有在押人员需要服务。');
+    if (distance(this.state.player, { x: cellToWorld(operation.gx), z: cellToWorld(operation.gz) }) > 20) return this.result(false, '请走到这座矫正中心 20 米内，再亲自服务。');
+    if (site.nextServiceAt > this.state.elapsed) return this.result(false, '本次服务刚结束，请让在押人员休息片刻。');
+    const def = PRISON_SERVICES[kind];
+    if (def.facility && !site.facilities[def.facility]) return this.result(false, `请先采购${PRISON_FACILITIES[def.facility].name}。`);
+    if (def.activity && operation.activity !== def.activity) return this.result(false, '请在这座中心的课程时段前来授课。');
+    if (this.state.player.energy < def.energy) return this.result(false, `参与服务需要 ${def.energy} 点精力。`);
+    if (this.state.money < def.wage) return this.result(false, `市政资金至少需要 ¥${def.wage}，用于支付本次服务工资。`);
+    this.state.money -= def.wage;
+    this.state.player.money += def.wage;
+    this.state.player.energy -= def.energy;
+    this.state.progression.totalEarned += def.wage;
+    this.state.prison.rehabilitation = clamp(this.state.prison.rehabilitation + def.rehabilitation);
+    this.state.prison.unrest = clamp(this.state.prison.unrest + def.unrest);
+    site.serviceVisits = Math.min(1e8, site.serviceVisits + 1);
+    site.nextServiceAt = this.state.elapsed + def.cooldown;
+    const community = this.state.progression.careers.community;
+    community.xp = Math.min(1e7, community.xp + 20); community.shifts = Math.min(1e7, community.shifts + 1);
+    this.updateJobTitle(); this.addSkillXP(def.skill, def.skillXP);
+    this.updateStats(); this.updateMissions();
+    return this.result(true, `${def.name}完成，个人工资 +¥${def.wage}，社区职业经验 +20，康复 +${def.rehabilitation}，不安 ${def.unrest}。`);
+  }
+
   upgradeBuilding(id: number): ActionResult {
     const building = this.state.buildings.find(b => b.id === id);
     if (!building || building.kind === 'road') return this.result(false, '请选择一栋可升级的城市建筑。');
@@ -552,6 +615,7 @@ export class Simulation {
   interact(action: Interaction, targetId?: number): ActionResult {
     if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请等待到站后再进行生活活动。');
     if (action === 'transit') return this.result(false, '请打开公交面板，选择同一路线上的目的站。');
+    if (action === 'corrections') return this.result(false, '请打开矫正中心管理面板，安排设施、员工、作息和亲自服务。');
     const p = this.state.player;
     if (action === 'study') return this.study(targetId);
     if (action === 'enter') return this.enterHome(targetId);
@@ -637,8 +701,7 @@ export class Simulation {
       this.addSkillXP('charisma', 12);
       p.social = clamp(p.social + 8);
       this.patrolBonus = Math.min(15, this.patrolBonus + 5);
-      if (this.state.prison.intake && this.state.stats.power >= this.state.stats.powerNeed && this.state.stats.water >= this.state.stats.waterNeed
-        && this.state.stats.prisoners < this.state.stats.prisonCapacity) this.state.stats.prisoners++;
+      if (this.state.prison.intake && this.state.stats.prisoners < getPrisonOperations(this.state).intakeCapacity) this.state.stats.prisoners++;
       this.cooldowns.set(action, this.state.elapsed + 8);
       this.updateStats();
       this.updateMissions();
@@ -842,12 +905,15 @@ export class Simulation {
     const water = this.units('water') * BUILDINGS.water.capacity;
     const structureLoad = active.filter(b => b.kind !== 'road').reduce((n, b) => n + b.level, 0);
     const demand = civic.policies.green ? .9 : 1;
-    const powerNeed = Math.round((population * 1.2 + structureLoad * 2 + this.state.stats.prisoners * .6) * demand);
-    const waterNeed = Math.round((population + structureLoad + this.state.stats.prisoners * .8) * demand);
+    const prisonCapacity = this.state.buildings.filter(b => b.kind === 'prison').reduce((sum, b) => sum + this.capacity(b), 0);
+    const prisoners = clamp(this.state.stats.prisoners, 0, prisonCapacity);
+    const powerNeed = Math.round((population * 1.2 + structureLoad * 2 + prisoners * .6) * demand);
+    const waterNeed = Math.round((population + structureLoad + prisoners * .8) * demand);
     const supplied = Math.min(1, power / Math.max(1, powerNeed), water / Math.max(1, waterNeed));
     const employed = Math.min(population, jobs);
-    const prisonCapacity = this.units('prison') * BUILDINGS.prison.capacity;
-    const prisoners = clamp(this.state.stats.prisoners, 0, prisonCapacity);
+    Object.assign(this.state.stats, { power, powerNeed, water, waterNeed, prisoners, prisonCapacity });
+    const corrections = getPrisonOperations(this.state);
+    if (!prisonCapacity) { this.state.corrections.intakeProgress = 0; this.state.corrections.releaseProgress = 0; }
     const policy = PRISON_RULES[this.state.prison.regime];
     const policySafety = prisonCapacity > 0 ? 10 + policy.safety - this.state.prison.unrest * .18 + this.state.prison.rehabilitation * .02 : 0;
     const safety = clamp(55 + this.units('police') * 24 + policySafety + this.patrolBonus - population * .075 + (civic.policies.community ? 4 : 0)
@@ -857,9 +923,9 @@ export class Simulation {
       + (population ? employed / population * 12 : 8) + safety * .08 - Math.max(0, this.state.tax - 9) * 3
       - (1 - supplied) * 36 - Math.max(0, population - capacity) * 4 + (civic.policies.green ? 3 : 0) + (this.hasEffect('celebration') ? 8 : 0)
       + (this.hasEffect('learning') ? 3 : 0) + Math.min(4, transit.coverage * .04) - (this.hasEffect('rationing') ? 5 : 0) - (this.hasEffect('disruption') ? 4 : 0) - pendingFires * 3, 5, 99));
-    const income = Math.round((population * (this.state.tax * 3.5) + employed * 18 + this.units('shop') * 120 + this.units('office') * 180 + prisoners * policy.grant) * (this.hasEffect('rationing') ? .9 : 1)) + transit.income;
+    const income = Math.round((population * (this.state.tax * 3.5) + employed * 18 + this.units('shop') * 120 + this.units('office') * 180 + prisoners * policy.grant + corrections.workIncome) * (this.hasEffect('rationing') ? .9 : 1)) + transit.income;
     const policyCost = (Object.keys(CITY_POLICIES) as CityPolicy[]).reduce((n, key) => n + (civic.policies[key] ? CITY_POLICIES[key].cost : 0), 0);
-    const expenses = Math.round(active.filter(b => b.kind !== 'busstop').reduce((n, b) => n + BUILDINGS[b.kind].upkeep * (1 + .6 * (b.level - 1)) * (b.kind === 'prison' ? policy.upkeep : 1), 0) + prisoners * policy.perPerson + policyCost) + transit.expenses;
+    const expenses = Math.round(active.filter(b => b.kind !== 'busstop').reduce((n, b) => n + BUILDINGS[b.kind].upkeep * (1 + .6 * (b.level - 1)) * (b.kind === 'prison' ? policy.upkeep : 1), 0) + prisoners * policy.perPerson + policyCost + corrections.totalExpenses) + transit.expenses;
     const education = Math.round(clamp(20 + this.units('school') * BUILDINGS.school.capacity / Math.max(1, population) * 50));
     const fireCoverage = Math.min(100, this.units('firestation') * 35);
     Object.assign(this.state.stats, { population, capacity, jobs, employed, happiness, income, expenses, power, powerNeed,
@@ -871,37 +937,38 @@ export class Simulation {
 
   private updatePrison(hours: number): void {
     const prison = this.state.prison;
-    const hour = this.state.hour;
-    prison.phase = hour >= 6 && hour < 8 ? '早餐' : hour >= 8 && hour < 12 ? '劳动' : hour >= 12 && hour < 16 ? '课程' : hour >= 16 && hour < 19 ? '放风' : '休息';
+    const operations = getPrisonOperations(this.state);
+    prison.phase = operations.phase;
+    const progress = this.state.corrections;
     const stats = this.state.stats;
     if (!stats.prisonCapacity || !hours) return;
     const rules = PRISON_RULES[prison.regime];
     const occupancy = stats.prisoners / stats.prisonCapacity;
     if (stats.prisoners > 0) {
-      prison.rehabilitation = clamp(prison.rehabilitation + hours * (rules.rehabilitation + (prison.phase === '课程' ? .18 : 0)));
-      prison.unrest = clamp(prison.unrest + hours * (rules.unrest + occupancy * .5 - prison.rehabilitation * .004));
+      prison.rehabilitation = clamp(prison.rehabilitation + hours * (rules.rehabilitation + operations.rehabilitationRate));
+      prison.unrest = clamp(prison.unrest + hours * (rules.unrest + occupancy * .5 - prison.rehabilitation * .004 + operations.unrestRate));
     } else prison.unrest = clamp(prison.unrest - hours * .6);
-    const operational = this.count('police') > 0 && stats.power >= stats.powerNeed && stats.water >= stats.waterNeed;
+    const operational = this.count('police') > 0 && operations.intakeCapacity > stats.prisoners;
     if (prison.intake && operational) {
-      this.arrests += hours * (.16 + stats.crime / 250) * rules.arrest;
-      if (this.arrests >= 1) {
-        const added = Math.min(Math.floor(this.arrests), stats.prisonCapacity - stats.prisoners);
+      progress.intakeProgress += hours * (.16 + stats.crime / 250) * rules.arrest;
+      if (progress.intakeProgress >= 1) {
+        const added = Math.min(Math.floor(progress.intakeProgress), operations.intakeCapacity - stats.prisoners);
         stats.prisoners += added;
-        this.arrests %= 1;
+        progress.intakeProgress %= 1;
         if (added > 0) this.notify(`矫正中心收押 ${added} 人，正在进行职业与社区康复。`, 'info');
       }
     }
     if (stats.prisoners > 0) {
-      this.releases += hours / rules.sentence * (.65 + prison.rehabilitation / 100);
-      if (this.releases >= 1) {
-        const released = Math.min(stats.prisoners, Math.floor(this.releases));
-        this.releases %= 1;
+      progress.releaseProgress += hours / rules.sentence * (.65 + prison.rehabilitation / 100);
+      if (progress.releaseProgress >= 1) {
+        const released = Math.min(stats.prisoners, Math.floor(progress.releaseProgress));
+        progress.releaseProgress %= 1;
         stats.prisoners -= released;
         prison.released += released;
         this.state.money += released * 200;
         this.notify(`${released} 名居民完成矫正重返社区，市政获得补助 ¥${released * 200}。`, 'good');
       }
-    } else this.releases = 0;
+    } else progress.releaseProgress = 0;
   }
 
   private assignResidents(): void {
@@ -1071,7 +1138,7 @@ export class Simulation {
 
   private clearTransient(): void {
     this.routes.clear(); this.routeDestinations.clear(); this.commands.clear(); this.cooldowns.clear();
-    this.hourlyClock = 0; this.arrivals = 0; this.arrests = 0; this.releases = 0; this.patrolBonus = 0;
+    this.hourlyClock = 0; this.arrivals = 0; this.patrolBonus = 0;
   }
 
   private restoreVisit(): void {
@@ -1084,7 +1151,7 @@ export class Simulation {
   private validSave(value: unknown): value is GameState {
     if (!value || typeof value !== 'object') return false;
     const s = value as GameState;
-    if (![1, 2, 3, VERSION].includes(s.version) || !finite(s.money) || Math.abs(s.money) > 1e12 || !finite(s.day) || s.day < 1 || !finite(s.hour) || s.hour < 0 || s.hour >= 24
+    if (![1, 2, 3, 4, VERSION].includes(s.version) || !finite(s.money) || Math.abs(s.money) > 1e12 || !finite(s.day) || s.day < 1 || !finite(s.hour) || s.hour < 0 || s.hour >= 24
       || !finite(s.tax) || s.tax < 3 || s.tax > 20 || ![0, 1, 3].includes(s.speed) || !finite(s.elapsed) || s.elapsed < 0 || s.elapsed > 1e9
       || !Number.isSafeInteger(s.nextId) || s.nextId < 1 || s.nextId > 1e12 || !Array.isArray(s.buildings) || s.buildings.length > 530
       || !Array.isArray(s.residents) || s.residents.length > 1200 || !Array.isArray(s.missions) || s.missions.length > 20
@@ -1198,6 +1265,24 @@ export class Simulation {
           || distance(pointAlong(canonical, journey.travelled).point, s.player) > .01) return false;
       }
     }
+    if (s.version >= 5) {
+      const corrections = s.corrections;
+      const prisonBuildings = s.buildings.filter(b => b.kind === 'prison');
+      if (!corrections || !Array.isArray(corrections.sites) || corrections.sites.length !== prisonBuildings.length
+        || ![corrections.intakeProgress, corrections.releaseProgress].every(n => finite(n) && n >= 0 && n < 1)
+        || s.stats.prisoners > prisonBuildings.reduce((sum, b) => sum + BUILDINGS.prison.capacity * b.level, 0)) return false;
+      const siteIds = new Set<number>();
+      for (const site of corrections.sites) {
+        if (!site || !prisonBuildings.some(b => b.id === site.buildingId) || siteIds.has(site.buildingId)
+          || !site.facilities || !(Object.keys(PRISON_FACILITIES) as PrisonFacility[]).every(kind => Number.isInteger(site.facilities[kind]) && site.facilities[kind] >= 0 && site.facilities[kind] <= PRISON_FACILITIES[kind].maxLevel)
+          || !site.staff || !(Object.keys(PRISON_STAFF) as PrisonStaff[]).every(role => Number.isInteger(site.staff[role]) && site.staff[role] >= 0 && site.staff[role] <= PRISON_STAFF[role].maxCount)
+          || !site.schedule || !(Object.keys(PRISON_SLOTS) as PrisonSlot[]).every(slot => ownKey(PRISON_ACTIVITIES, site.schedule[slot]))
+          || !Number.isSafeInteger(site.serviceVisits) || site.serviceVisits < 0 || site.serviceVisits > 1e8
+          || !finite(site.nextServiceAt) || site.nextServiceAt < 0 || site.nextServiceAt > s.elapsed + 20.001
+          || (site.serviceVisits === 0 && site.nextServiceAt !== 0)) return false;
+        siteIds.add(site.buildingId);
+      }
+    }
     const missionIds = new Set<string>();
     for (const m of s.missions) {
       if (!m || typeof m.id !== 'string' || !['residents', 'parks', 'friends', 'work', 'justice', 'settle', 'decorate', 'visitor', 'career', 'civic', 'services'].includes(m.id) || missionIds.has(m.id)
@@ -1245,6 +1330,14 @@ export class Simulation {
       prison: legacy ? { intake: true, regime: 'balanced', unrest: 8, rehabilitation: 40, released: 0, phase: '劳动' }
         : { intake: copy.prison.intake, regime: copy.prison.regime, unrest: copy.prison.unrest,
           rehabilitation: copy.prison.rehabilitation, released: copy.prison.released, phase: copy.prison.phase }, progression, civic,
+      corrections: copy.version < 5
+        ? { sites: copy.buildings.filter(b => b.kind === 'prison').map(b => createPrisonSite(b.id, b.level)), intakeProgress: 0, releaseProgress: 0 }
+        : { sites: copy.corrections.sites.map(site => ({ buildingId: site.buildingId,
+          facilities: { classroom: site.facilities.classroom, workshop: site.facilities.workshop, infirmary: site.facilities.infirmary },
+          staff: { guards: site.staff.guards, counselors: site.staff.counselors },
+          schedule: { morning: site.schedule.morning, afternoon: site.schedule.afternoon, evening: site.schedule.evening },
+          serviceVisits: site.serviceVisits, nextServiceAt: site.nextServiceAt })),
+          intakeProgress: copy.corrections.intakeProgress, releaseProgress: copy.corrections.releaseProgress },
       transit: copy.version < 4 ? { enabled: true, fare: 4, totalTrips: 0, journey: null }
         : { enabled: copy.transit.enabled, fare: copy.transit.fare, totalTrips: copy.transit.totalTrips,
           journey: copy.transit.journey ? { fromId: copy.transit.journey.fromId, toId: copy.transit.journey.toId,
