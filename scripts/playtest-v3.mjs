@@ -53,7 +53,7 @@ try{
   await page.goto(process.env.HAVEN_TEST_URL||'http://localhost:5175/',{waitUntil:'networkidle'});
   await page.waitForFunction(()=>!!window.__HAVEN__);await pause();
   const seed=await state(),festival=seed.civic.events.find(e=>e.kind==='festival');
-  check('schema three has career skills and civic state',seed.version===3&&seed.progression.career==='business'&&seed.progression.skills.logic===0&&festival.status==='pending');
+  check('current schema preserves career skills and civic state',seed.version>=3&&seed.progression.career==='business'&&seed.progression.skills.logic===0&&festival.status==='pending');
   check('pending event has a scene marker',(await markers()).some(m=>m.id===festival.id));
   await page.keyboard.press('j');
   check('J opens the event journal',await page.locator('#journal-active').isVisible());

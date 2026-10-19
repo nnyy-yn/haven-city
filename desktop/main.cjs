@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { readReleaseConfig } = require('./release-settings.cjs');
 const { createUpdateController } = require('./update-controller.cjs');
+const { checkPortableRelease } = require('./portable-release.cjs');
 
 const GAME_ROOT = path.join(__dirname, 'game');
 const GAME_URL = 'haven://game/index.html';
@@ -97,6 +98,8 @@ else {
     registerGameProtocol();
     updates = createUpdateController({
       release, isPackaged: app.isPackaged, isPortable: !!process.env.PORTABLE_EXECUTABLE_FILE,
+      // Node fetch exposes manual redirect headers for the public release-page fallback.
+      checkPortableRelease: () => checkPortableRelease(release, app.getVersion(), globalThis.fetch.bind(globalThis)),
       createUpdater: options => { const { NsisUpdater } = require('electron-updater'); return new NsisUpdater(options); },
       publish: state => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('haven:update:state', state); },
       openRelease: url => { if (!isReleaseUrl(url)) throw new Error('无效的发行页地址。'); return shell.openExternal(url); },

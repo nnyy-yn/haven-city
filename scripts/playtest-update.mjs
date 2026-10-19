@@ -6,18 +6,20 @@ import assert from 'node:assert/strict';
 // Reuse the same externally supplied Playwright/Chrome paths as the game smoke tests.
 const { chromium } = createRequire(import.meta.url)(process.env.HAVEN_PLAYWRIGHT_PATH || 'playwright');
 const root = resolve(import.meta.dirname, '..');
-const out = resolve(root, process.env.HAVEN_TEST_OUT || 'playtest/updates');
+const out = resolve(root, process.env.HAVEN_TEST_OUT || 'playtest/v04-updates');
 const url = process.env.HAVEN_TEST_URL || 'http://localhost:5175/';
 const config = JSON.parse(await readFile(resolve(root, 'src/release-config.json'), 'utf8'));
 assert.ok(config.owner && config.repo, 'Update UI tests require a configured public repository');
+const currentVersion = config.version;
+const newVersion = '0.5.0';
 const repository = `${config.owner}/${config.repo}`;
 const apiUrl = `https://api.github.com/repos/${repository}/releases/latest`;
-const release = (version = '0.4.0') => ({
+const release = (version = newVersion) => ({
   tag_name: `v${version}`, draft: false, prerelease: false,
   html_url: `https://github.com/${repository}/releases/tag/v${version}`,
   assets: [{
-    name: `HavenCity-Setup-${version}.exe`, state: 'uploaded', content_type: 'application/octet-stream',
-    browser_download_url: `https://github.com/${repository}/releases/download/v${version}/HavenCity-Setup-${version}.exe`,
+    name: `HavenCity-Portable-${version}-x64.exe`, state: 'uploaded', content_type: 'application/octet-stream',
+    browser_download_url: `https://github.com/${repository}/releases/download/v${version}/HavenCity-Portable-${version}-x64.exe`,
   }],
 });
 await mkdir(out, { recursive: true });
@@ -77,7 +79,7 @@ async function boot(scenario, viewport = {width: 1600, height: 1000}) {
   await page.waitForFunction(() => !document.querySelector('#toast')?.classList.contains('visible'), null, {timeout: 7000});
   await page.waitForTimeout(250);
   check('opening the game and menu does not check or download automatically', apiRequests.length === before, {before, after: apiRequests.length});
-  check('menu displays the running version', await page.locator('.update-heading').innerText().then(text => text.includes('v0.3.0')));
+  check('menu displays the configured running version', await page.locator('.update-heading').innerText().then(text => text.includes(`v${currentVersion}`)), {currentVersion});
 }
 
 async function clickCheck(label) {
@@ -99,9 +101,9 @@ async function clickCheck(label) {
 
 async function assertReleaseLink(label) {
   const links = await safeLinks();
-  check(`${label}: download link stays on this repository's exact release page`, links.length === 1 && links[0].href === `https://github.com/${repository}/releases/tag/v0.4.0`, links);
+  check(`${label}: download link stays on this repository's exact release page`, links.length === 1 && links[0].href === `https://github.com/${repository}/releases/tag/v${newVersion}`, links);
   check(`${label}: release page opens separately with opener protection`, links[0]?.target === '_blank' && /\bnoopener\b/.test(links[0].rel) && /\bnoreferrer\b/.test(links[0].rel), links);
-  check(`${label}: browser offers no native download or install action`, await page.locator('#update-state [data-ui="download-update"],#update-state [data-ui="install-update"]').count() === 0);
+  check(`${label}: browser offers only the portable EXE release link`, await page.locator('#update-state button:not([data-ui="check-update"])').count() === 0 && /免安装 EXE/.test(await panel().innerText()) && /关闭游戏/.test(await panel().innerText()));
 }
 
 try {
@@ -109,7 +111,7 @@ try {
   await snap('01-menu-before-check');
   await clickCheck('new stable version');
   await status('available').waitFor({state: 'visible'});
-  check('new stable 0.4.0 is visible', (await panel().innerText()).includes('v0.4.0'));
+  check(`new stable ${newVersion} is visible`, (await panel().innerText()).includes(`v${newVersion}`));
   await assertReleaseLink('desktop');
   const afterAvailable = apiRequests.length;
   await page.locator('#drawer [data-ui="close-drawer"]').click();
@@ -118,10 +120,10 @@ try {
   check('reopening the menu preserves the update without fetching or downloading', apiRequests.length === afterAvailable && await status('available').isVisible());
   await snap('02-new-stable-version');
 
-  await boot({status: 200, body: release('0.3.0')});
+  await boot({status: 200, body: release(currentVersion)});
   await clickCheck('current version');
   await status('current').waitFor({state: 'visible'});
-  check('current 0.3.0 reports current without a download link', (await panel().innerText()).includes('已是最新版本') && (await safeLinks()).length === 0);
+  check(`current ${currentVersion} reports current without a download link`, (await panel().innerText()).includes('已是最新版本') && (await safeLinks()).length === 0);
   check('current version can be checked again', await checkButton().isEnabled());
   await snap('03-current-version');
 
@@ -134,24 +136,24 @@ try {
   await clickCheck('repeated HTTP 503 retry');
   await status('error').waitFor({state: 'visible'});
   check('repeated failure leaves retry usable', await checkButton().isEnabled());
-  mock = {status: 200, body: release('0.3.0')};
+  mock = {status: 200, body: release(currentVersion)};
   await clickCheck('successful retry without reloading');
   await status('current').waitFor({state: 'visible'});
   check('retry recovers from HTTP errors in the same menu', await status('current').isVisible());
 
   const hostilePage = release();
-  hostilePage.html_url = 'https://github.com.evil.example/nnyy-yn/haven-city/releases/tag/v0.4.0';
+  hostilePage.html_url = `https://github.com.evil.example/${repository}/releases/tag/v${newVersion}`;
   await boot({status: 200, body: hostilePage});
   await clickCheck('unsafe release page');
   await status('error').waitFor({state: 'visible'});
   check('unsafe release page becomes an error and never a clickable link', (await safeLinks()).length === 0);
   await snap('05-unsafe-release-rejected');
   const hostileAsset = release();
-  hostileAsset.assets[0].browser_download_url = 'https://github.com/another-owner/haven-city/releases/download/v0.4.0/HavenCity-Setup-0.4.0.exe';
+  hostileAsset.assets[0].browser_download_url = `https://github.com/another-owner/${config.repo}/releases/download/v${newVersion}/HavenCity-Portable-${newVersion}-x64.exe`;
   mock = {status: 200, body: hostileAsset};
-  await clickCheck('foreign installer repository');
+  await clickCheck('foreign portable EXE repository');
   await status('error').waitFor({state: 'visible'});
-  check('a valid release page cannot authorize a foreign installer', (await safeLinks()).length === 0 && await checkButton().isEnabled());
+  check('a valid release page cannot authorize a foreign portable EXE', (await safeLinks()).length === 0 && await checkButton().isEnabled());
 
   await boot({status: 200, body: release()}, {width: 390, height: 844});
   await clickCheck('mobile new stable version');
@@ -186,7 +188,7 @@ try {
   check('no external download or unauthorized host was requested', unexpectedExternalRequests.length === 0, unexpectedExternalRequests);
   check('no browser runtime errors', errors.length === 0, errors);
   check('all local resources and mocked API requests completed', failedRequests.length === 0, failedRequests);
-  const report = {passed: checks.length, url, repository, checks, errors, failedRequests, apiRequests, unexpectedExternalRequests};
+  const report = {passed: checks.length, url, repository, currentVersion, newVersion, checks, errors, failedRequests, apiRequests, unexpectedExternalRequests};
   await writeFile(resolve(out, 'report.json'), JSON.stringify(report, null, 2));
   await Promise.all([rm(resolve(out, 'failure.json'), {force: true}), rm(resolve(out, 'failure.png'), {force: true})]);
   console.log(JSON.stringify({passed: checks.length, requests: apiRequests.length, screenshots: out}, null, 2));

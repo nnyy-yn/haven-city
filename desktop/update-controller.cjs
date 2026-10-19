@@ -2,7 +2,7 @@
 
 /** The only updater entry points are explicit renderer requests. No timers check or install updates. */
 function createUpdateController(options) {
-  const { release, isPackaged, isPortable, createUpdater, publish, openRelease, prepareInstall, confirmInstall } = options;
+  const { release, isPackaged, isPortable, createUpdater, checkPortableRelease, publish, openRelease, prepareInstall, confirmInstall } = options;
   let state = !release.configured
     ? { status: 'unconfigured', message: '尚未配置 GitHub 更新仓库。' }
     : !isPackaged
@@ -53,6 +53,21 @@ function createUpdateController(options) {
       if (state.status === 'unconfigured' || state.status === 'downloading' || state.status === 'downloaded') return snapshot();
       if (checkPromise) return checkPromise;
       setState({ status: 'checking', message: '正在检查 GitHub 最新版本…' });
+      if (isPortable) {
+        availableVersion = undefined;
+        // Portable releases do not use NSIS metadata or latest.yml, which may still describe an older installer.
+        checkPromise = Promise.resolve().then(() => {
+          if (typeof checkPortableRelease !== 'function') throw new Error('免安装版检查服务不可用，请前往 GitHub 发行页。');
+          return checkPortableRelease();
+        }).then(info => {
+          if (!info || typeof info.available !== 'boolean' || typeof info.version !== 'string' || info.version.length > 160
+            || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(info.version)) throw new Error('免安装版发布信息无效。');
+          availableVersion = info.available ? info.version : undefined;
+          return setState({ status: info.available ? 'available' : 'current', version: info.version,
+            message: info.available ? '发现新版本，请从发行页下载免安装 EXE，关闭游戏后替换。' : '当前已是最新版本。' });
+        }).catch(failure).finally(() => { checkPromise = undefined; });
+        return checkPromise;
+      }
       checkPromise = Promise.resolve().then(() => getUpdater().checkForUpdates()).then(snapshot).catch(failure).finally(() => { checkPromise = undefined; });
       return checkPromise;
     },

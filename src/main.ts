@@ -4,6 +4,7 @@ import { CityWorld } from './world';
 import { CityPhysics } from './physics';
 import { InteriorWorld } from './interior';
 import { GameUI } from './ui';
+import { getTransitNetwork } from './transit';
 import { BUILDINGS, FURNITURE, wageFor, cellToWorld, worldToCell, type ActionResult, type Building, type BuildingKind, type CameraMode, type Interaction, type Resident, type Tool } from './types';
 import './style.css';
 
@@ -73,7 +74,34 @@ async function boot() {
     findContext();refresh();
     return result;
   }
-  function interact(action:Interaction,id?:number){runAction(()=>sim.interact(action,id));}
+  function interact(action:Interaction,id?:number){
+    if(action==='transit'){openTransit();return;}
+    runAction(()=>sim.interact(action,id));
+  }
+  function openTransit(){
+    keys.clear();drag=null;
+    if(document.pointerLockElement)document.exitPointerLock();
+    ui.openTransit();refresh();
+  }
+  function exportSave(){
+    try{
+      const data=sim.exportSave();
+      const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));
+      const link=document.createElement('a');link.href=url;link.download=`栖湾市-第${sim.state.day}天.json`;
+      document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+      ui.toast('城市备份已导出，可在另一台设备导入继续生活。','good');
+    }catch{ui.toast('备份导出失败，请稍后重试。','bad');}
+  }
+  async function importSave(file:File){
+    if(file.size>2*1024*1024){ui.toast('备份文件过大，请选择小于 2 MB 的城市备份。','bad');return;}
+    if(document.pointerLockElement)document.exitPointerLock();
+    if(!window.confirm('导入备份将替换当前城市与居民进度。建议先导出当前城市的备份。继续导入吗？'))return;
+    try{
+      const data=await file.text();
+      const result=runAction(()=>sim.importSave(data),true);
+      if(result.ok){ui.closeDrawer();keys.clear();refresh();}
+    }catch{ui.toast('无法读取这个文件，当前城市已保留。','bad');}
+  }
   function openJournal(id?:number){
     keys.clear();drag=null;
     if(document.pointerLockElement)document.exitPointerLock();
@@ -117,6 +145,19 @@ async function boot() {
     policy:(policy,enabled)=>{runAction(()=>sim.setPolicy(policy,enabled));},
     resolveEvent:(id,choice)=>{runAction(()=>sim.resolveEvent(id,choice));},
     focusEvent,
+    transitEnabled:enabled=>{runAction(()=>sim.setTransitEnabled(enabled));},
+    transitFare:fare=>{runAction(()=>sim.setTransitFare(fare));},
+    rideTransit:id=>{
+      const result=runAction(()=>sim.rideTransit(id));
+      if(result.ok){
+        ui.closeDrawer();
+        if(!sim.state.speed)sim.setSpeed(1);
+        if(mode==='city')setMode('third');
+        lifeYaw=sim.state.player.yaw;keys.clear();drag=null;refresh();
+      }
+    },
+    exportSave,
+    importSave:file=>{void importSave(file);},
     save:()=>{const r=sim.save();ui.toast(r.message,r.ok?'good':'bad');},
     load:()=>{runAction(()=>sim.load(),true);},
     reset:()=>{sim.reset();selected=null;tool='select';setMode('city');distance=245;cityPitch=.66;target.set(5,0,5);syncWorlds();refresh();},
@@ -253,6 +294,7 @@ async function boot() {
     if(e.code==='KeyF'&&contextAction&&mode!=='city')interact(contextAction,contextTarget);
     if(e.code==='KeyH'&&mode!=='city')interact(sim.state.interior?'exit':'enter');
     if(e.code==='KeyJ')openJournal();
+    if(e.code==='KeyT')openTransit();
     if(e.code==='KeyR')focus();
     if(e.code==='KeyB'&&mode==='city'){tool=tool==='road'?'select':'road';refresh();}
   });
@@ -265,7 +307,7 @@ async function boot() {
 
   function updateCamera(dt:number){
     const blocked=ui?.isModalOpen()??false;
-    if(blocked)keys.clear();
+    if(blocked){keys.clear();drag=null;if(document.pointerLockElement)document.exitPointerLock();}
     if(mode==='city'){
       if(!blocked){
         const mx=Number(keys.has('KeyD')||keys.has('ArrowRight'))-Number(keys.has('KeyA')||keys.has('ArrowLeft'));
@@ -280,7 +322,7 @@ async function boot() {
       camera.lookAt(target);
     }else{
       const p=sim.state.player;
-      if(!blocked){
+      if(!blocked&&!sim.state.transit.journey){
         lifeYaw+=(Number(keys.has('KeyQ'))-Number(keys.has('KeyE')))*dt*1.5;
         const f=Number(keys.has('KeyW')||keys.has('ArrowUp'))-Number(keys.has('KeyS')||keys.has('ArrowDown'));
         const r=Number(keys.has('KeyD')||keys.has('ArrowRight'))-Number(keys.has('KeyA')||keys.has('ArrowLeft'));
@@ -311,6 +353,7 @@ async function boot() {
   }
   function findContext(){
     if(mode==='city'){ui.setContext('');contextAction=undefined;return;}
+    if(sim.state.transit.journey){contextAction=undefined;contextTarget=undefined;ui.setContext('');return;}
     const p=sim.state.player;
     if(sim.state.interior){
       if(Math.hypot(p.x,p.z-7.1)<2.4){contextAction='exit';contextTarget=undefined;ui.setContext('走出家门 · 回到自己的城市',contextAction);return;}
@@ -328,7 +371,7 @@ async function boot() {
     if(resident){contextAction='talk';contextTarget=resident.r.id;ui.setContext(`与${resident.r.name}聊聊天`,contextAction,contextTarget);return;}
     for(const {b} of nearby){
       const homeAction:[Interaction,string]=p.homeId===b.id?['enter','打开家门，回到自己的家 · H']:['adopt','在这里安家，认领自己的住宅'];
-      const actions:Partial<Record<BuildingKind,[Interaction,string]>>={home:homeAction,apartment:homeAction,shop:['eat','来一份热腾腾的午餐 · ¥35'],office:['work',`工作一班 · 赚取 ¥${wageFor(sim.state.progression)}`],park:['relax','坐下来，享受一会儿绿意'],police:['patrol','加入社区巡逻'],prison:['patrol','参与矫正中心值勤'],school:['study','参加学校进修 · 个人 ¥60 / 逻辑经验 +45']};
+      const actions:Partial<Record<BuildingKind,[Interaction,string]>>={home:homeAction,apartment:homeAction,shop:['eat','来一份热腾腾的午餐 · ¥35'],office:['work',`工作一班 · 赚取 ¥${wageFor(sim.state.progression)}`],park:['relax','坐下来，享受一会儿绿意'],police:['patrol','加入社区巡逻'],prison:['patrol','参与矫正中心值勤'],school:['study','参加学校进修 · 个人 ¥60 / 逻辑经验 +45'],busstop:['transit','查看公交线路与目的站 · T']};
       const a=actions[b.kind];if(!a)continue;
       contextAction=a[0];contextTarget=b.id;ui.setContext(a[1],a[0],b.id);return;
     }
@@ -355,6 +398,8 @@ async function boot() {
   (window as unknown as Record<string,unknown>).__HAVEN__={
     getState:()=>JSON.parse(JSON.stringify(sim.state)),
     getEventMarkers:()=>world.getEventMarkers(),
+    getTransitNetwork:()=>getTransitNetwork(sim.state),
+    getRenderDiagnostics:()=>world.getRenderDiagnostics(),
     getView:()=>({mode,tool,location:sim.state.interior?'home':'city',selected:selected?.id,lifeYaw,camera:camera.position.toArray(),fps:renderCount/Math.max(1,renderTime),drawCalls:renderer.info.render.calls,triangles:renderer.info.render.triangles}),
     getScreenPosition:(x:number,z:number,height=.3)=>{const p=new THREE.Vector3(x,height,z).project(camera);return {x:(p.x+1)*innerWidth/2,y:(1-p.y)*innerHeight/2};}
   };

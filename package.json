@@ -1,5 +1,5 @@
 {
-  "name": "haven-city", "version": "0.3.0", "private": true, "type": "module",
+  "name": "haven-city", "version": "0.4.0", "private": true, "type": "module",
   "scripts": { "dev": "node node_modules/vite/bin/vite.js --host 0.0.0.0", "build": "node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build && node scripts/standalone.mjs", "build:win": "node scripts/build-windows.mjs", "preview": "node node_modules/vite/bin/vite.js preview --host 0.0.0.0", "test": "node --experimental-strip-types --test tests/*.test.ts" },
   "dependencies": { "three": "0.180.0", "@dimforge/rapier3d-compat": "0.19.3" },
   "devDependencies": { "@types/three": "0.180.0", "typescript": "~5.9.3", "vite": "^7.1.10" }

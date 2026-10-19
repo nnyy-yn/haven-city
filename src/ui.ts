@@ -1,5 +1,6 @@
 import { BUILDINGS, FURNITURE, PRISON_RULES, CAREERS, CITY_EVENTS, CITY_POLICIES, LEVEL_XP, xpLevel, wageFor, GRID, TILE, cellToWorld, type Building, type BuildingKind, type CameraMode, type CareerTrack, type CityEvent, type CityPolicy, type EventChoice, type FurnitureKind, type GameState, type Interaction, type PrisonRegime, type Resident, type SkillKind, type SocialAction, type Speed, type Tool } from './types';
 import { GameUpdater, type UpdateState } from './updater';
+import { getTransitNetwork } from './transit';
 
 export interface UIActions {
   tool: (tool: Tool) => void;
@@ -22,11 +23,17 @@ export interface UIActions {
   policy: (policy: CityPolicy, enabled: boolean) => void;
   resolveEvent: (id: number, choice: EventChoice) => void;
   focusEvent: (id: number) => void;
+  transitEnabled: (enabled: boolean) => void;
+  transitFare: (fare: number) => void;
+  rideTransit: (destinationId: number) => void;
+  exportSave: () => void;
+  importSave: (file: File) => void;
 }
 
 const paths: Record<string, string> = {
   cursor: '<path d="m5 3 14 9-7 1-4 7z"/>',
   road: '<path d="m7 3-3 18M17 3l3 18M12 4v3m0 4v3m0 4v3"/>',
+  bus: '<rect x="4" y="3" width="16" height="16" rx="3"/><path d="M4 10h16M8 3v7m8-7v7M7 19v3m10-3v3M8 14h.01M16 14h.01"/>',
   home: '<path d="m3 10 9-7 9 7M5 9v11h14V9M10 20v-7h4v7"/>',
   building: '<path d="M5 21V3h14v18M3 21h18M9 7h1m4 0h1M9 11h1m4 0h1M9 15h1m4 0h1m-4 6v-3h2v3"/>',
   shop: '<path d="M4 10v11h16V10M3 7l2-4h14l2 4v3H3zM8 21v-7h5v7m3-7h1"/>',
@@ -71,7 +78,7 @@ const esc = (value: unknown) => String(value).replace(/[&<>"']/g, s => ({'&':'&a
 const number = (n: number) => Math.round(n).toLocaleString('zh-CN');
 const pct = (n: number) => Math.min(100, Math.max(0, n));
 const categories = ['居住', '商业', '公共', '管理'] as const;
-const actionNames: Record<Interaction, string> = { talk:'打个招呼', eat:'吃顿热饭', rest:'回家休息', work:'开始工作', relax:'享受公园', adopt:'搬入新家', patrol:'参与巡逻', enter:'进入我的家', exit:'离开住宅', furniture:'使用附近家具', study:'参加学校进修' };
+const actionNames: Record<Interaction, string> = { talk:'打个招呼', eat:'吃顿热饭', rest:'回家休息', work:'开始工作', relax:'享受公园', adopt:'搬入新家', patrol:'参与巡逻', enter:'进入我的家', exit:'离开住宅', furniture:'使用附近家具', study:'参加学校进修', transit:'查看公交线路' };
 const relationship = (n: number) => n < 20 ? '初次见面' : n < 35 ? '熟悉的邻居' : n < 70 ? '好朋友' : '亲密好友';
 const regimes: [PrisonRegime, string][] = [['balanced','均衡日常'],['rehabilitation','康复优先'],['strict','严格监管']];
 const prisonSchedule = [['06—08','早餐'],['08—12','劳动'],['12—16','课程'],['16—19','放风'],['19—06','休息']];
@@ -87,7 +94,7 @@ export class GameUI {
   private mode: CameraMode = 'city';
   private tool: Tool = 'select';
   private category: typeof categories[number] = '居住';
-  private drawer: 'manage' | 'menu' | 'help' | 'furniture' | 'contacts' | 'career' | 'journal' | null = null;
+  private drawer: 'manage' | 'menu' | 'help' | 'furniture' | 'contacts' | 'career' | 'journal' | 'transit' | null = null;
   private journalEventId?: number;
   private historyExpanded = false;
   private missionCollapsed = false;
@@ -101,7 +108,9 @@ export class GameUI {
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
   private updater = new GameUpdater();
   private updateState: UpdateState = this.updater.getState();
-  private installingUpdate = false;
+  private lastJourney: {destination: string; totalTrips: number} | null = null;
+  private arrivedAt = '';
+  private arrivalUntil = 0;
 
   constructor(private root: HTMLElement, private actions: UIActions) {
     root.className = 'game-ui';
@@ -123,9 +132,12 @@ export class GameUI {
       <div class="minimap-wrap"><div class="minimap-heading"><span id="map-title">栖湾 · 城区鸟瞰</span><button data-ui="focus" title="回到焦点" aria-label="回到焦点">${icon('focus')}</button></div><canvas id="minimap" width="174" height="142" aria-label="城市与室内小地图"></canvas><span class="map-north">N <i>↑</i></span><div class="minimap-footer"><i></i><span id="map-mode">规划视角</span><span id="map-scale">240 m</span></div></div>
       <div class="world-credit">栖居于此 <span>·</span> 自在生长</div>`;
     root.querySelector('.life-utilities')!.insertAdjacentHTML('beforeend', `<button data-ui="drawer" data-drawer="career" title="职业进展与个人技能">${icon('work')}<span>职业与技能</span></button>`);
+    root.querySelector('.life-utilities')!.insertAdjacentHTML('beforeend', `<button data-ui="drawer" data-drawer="transit" title="公交线路与乘车 · T">${icon('bus')}<span>公共交通</span></button>`);
+    root.insertAdjacentHTML('beforeend', `<div id="transit-journey" class="transit-journey glass" role="status" aria-live="polite" hidden><span class="journey-symbol">${icon('bus')}</span><div class="journey-copy"><div><strong id="journey-title"></strong><span id="journey-progress-label"></span></div><div id="journey-progress" class="journey-progress" role="progressbar" aria-label="公交行程进度" aria-valuemin="0" aria-valuemax="100"><i></i></div></div><button class="icon-button" data-ui="drawer" data-drawer="transit" title="查看行程与公交线路" aria-label="查看公交行程">${icon('chevron')}</button></div><input id="import-save-input" data-ui="import-file" type="file" accept="application/json,.json" aria-label="选择城市备份文件" hidden>`);
     this.minimap = root.querySelector<HTMLCanvasElement>('#minimap')!;
     root.addEventListener('click', this.onClick);
     root.addEventListener('input', this.onInput);
+    root.addEventListener('change', this.onChange);
     root.addEventListener('pointerdown', e => { if ((e.target as HTMLElement).closest('button,input,.drawer,.inspector,.build-dock,.life-dock')) e.stopPropagation(); });
     window.addEventListener('keydown', e => {
       if (e.code !== 'Escape' || !this.drawer) return;
@@ -169,12 +181,17 @@ export class GameUI {
       case 'journal': if (this.drawer === 'journal') { this.drawer = null; this.renderDrawer(); this.renderMission(); } else this.openJournal(); break;
       case 'resolve-event': this.actions.resolveEvent(Number(data.id), data.choice as EventChoice); this.refreshJournal(); break;
       case 'focus-event': this.journalEventId = Number(data.id); this.actions.focusEvent(Number(data.id)); this.refreshJournal(); break;
+      case 'transit-enabled': this.actions.transitEnabled(!this.state?.transit.enabled); this.refreshTransit(); this.refreshManagement(); break;
+      case 'transit-fare': this.actions.transitFare(Number(data.fare)); this.refreshTransit(); break;
+      case 'ride-transit': this.actions.rideTransit(Number(data.id)); this.refreshTransit(); break;
       case 'event-history': this.historyExpanded = !this.historyExpanded; this.refreshJournal(); break;
       case 'context': if (this.contextAction) this.actions.interact(this.contextAction, this.contextId); break;
       case 'focus': this.actions.focus(); break;
       case 'follow': this.actions.selectResident(Number(data.id)); this.actions.focus(); break;
       case 'save': this.actions.save(); break;
       case 'load': this.actions.load(); break;
+      case 'export-save': this.actions.exportSave(); break;
+      case 'import-save': this.root.querySelector<HTMLInputElement>('#import-save-input')!.click(); break;
       case 'confirm-reset': this.confirming = true; this.renderDrawer(); break;
       case 'cancel-reset': this.confirming = false; this.renderDrawer(); break;
       case 'reset': this.actions.reset(); this.drawer = null; this.confirming = false; this.renderDrawer(); break;
@@ -183,7 +200,6 @@ export class GameUI {
       case 'check-update': void this.updater.check(); break;
       case 'download-update': void this.updater.download(); break;
       case 'save-before-update': this.actions.save(); break;
-      case 'install-update': if (!this.installingUpdate) { this.installingUpdate = true; this.refreshUpdater(); void this.updater.install().finally(() => { this.installingUpdate = false; this.refreshUpdater(); }); } break;
     }
     button.blur();
   };
@@ -215,13 +231,24 @@ export class GameUI {
     }
   };
 
+  private onChange = (event: Event) => {
+    const input = event.target as HTMLInputElement;
+    if (input.id !== 'import-save-input') return;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { this.toast('备份文件请小于或等于 2 MB。', 'bad'); return; }
+    this.actions.importSave(file);
+  };
+
   update(state: GameState, mode: CameraMode, tool: Tool, selected: Building | Resident | null) {
     const modeChanged = this.mode !== mode;
     const toolChanged = this.tool !== tool;
-    if(this.state !== state) this.lastNotice = 0;
+    if(this.state !== state) { this.lastNotice = 0; this.lastJourney = null; this.arrivalUntil = 0; }
     this.state = state; this.mode = mode; this.selected = selected; this.tool = tool;
     this.root.dataset.mode = mode;
     this.root.dataset.interior = String(Boolean(state.interior));
+    this.root.dataset.journey = String(Boolean(state.transit.journey));
     if (!state.interior && this.drawer === 'furniture') { this.drawer = null; this.renderDrawer(); }
     this.root.querySelector<HTMLElement>('#interior-banner')!.hidden = !state.interior;
     const homeButton = this.root.querySelector<HTMLButtonElement>('#home-button')!;
@@ -232,7 +259,10 @@ export class GameUI {
     this.root.querySelector<HTMLElement>('.indoor-clean')!.hidden = !state.interior;
     const guest = state.interior?.guestId ? state.residents.find(r => r.id === state.interior?.guestId) : undefined;
     this.text('home-guest', guest ? `${guest.name} 来做客了，和朋友聊聊近况吧。` : '把日常过成喜欢的模样。');
-    this.text('life-location', state.interior ? '享受居家时光' : '正在体验生活');
+    this.text('life-location', state.transit.journey ? '搭乘城市公交' : state.interior ? '享受居家时光' : '正在体验生活');
+    this.root.querySelectorAll<HTMLButtonElement>('#life-dock [data-ui="interact"],#life-dock [data-ui="use-furniture-kind"]').forEach(button => {
+      button.disabled = Boolean(state.transit.journey) || (button.id === 'home-button' && !state.player.homeId);
+    });
     this.text('map-title', state.interior ? '我的家 · 房间平面图' : '栖湾 · 城区鸟瞰');
     this.text('map-scale', state.interior ? '室内' : '240 m');
     this.text('city-money', number(state.money));
@@ -278,6 +308,8 @@ export class GameUI {
     if (this.drawer === 'contacts') this.refreshContacts();
     if (this.drawer === 'career') this.refreshCareer();
     if (this.drawer === 'journal') this.refreshJournal();
+    if (this.drawer === 'transit') this.refreshTransit();
+    this.refreshJourney();
     if (modeChanged && !this.tipDismissed) this.text('tip-copy', mode === 'city' ? '从一条道路、一间小屋开始，也可以按 2 走进这座城。' : 'WASD 移动，右键拖动环顾。靠近建筑或居民，按 F 互动。');
     const notices = state.notices.filter(n => n.id > this.lastNotice);
     if (notices.length) {
@@ -313,7 +345,7 @@ export class GameUI {
 
   private renderInspector() {
     const el = this.root.querySelector<HTMLElement>('#inspector')!;
-    el.hidden = !this.selected || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'contacts' || this.drawer === 'furniture' || this.drawer === 'career' || this.drawer === 'journal';
+    el.hidden = !this.selected || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'contacts' || this.drawer === 'furniture' || this.drawer === 'career' || this.drawer === 'journal' || this.drawer === 'transit';
     if (!this.selected || !this.state) { this.cache.delete('inspector-content'); return; }
     const selected = this.selected;
     let html = '';
@@ -332,6 +364,7 @@ export class GameUI {
       const canInvite = Boolean(this.state.interior && this.state.interior.homeId === this.state.player.homeId && selected.relation >= 35 && this.state.interior.guestId !== selected.id);
       html = `<div class="inspect-overline">${icon('person')}<span>栖湾居民</span><span class="status-dot online"></span><small>${esc(selected.activity)}</small></div><div class="resident-profile"><div class="profile-avatar" style="--resident-color:${esc(selected.color)}">${icon('person')}</div><div><h2>${esc(selected.name)}</h2><p>${selected.jobId ? '有一份稳定的工作' : '正在寻找生活的可能'}</p></div></div><div class="inspect-facts"><div><span>心情</span><strong>${Math.round(selected.mood)} / 100</strong></div><div><span>彼此关系</span><strong>${relationship(selected.relation)} · ${Math.round(selected.relation)}</strong></div></div><div class="relation-track"><i style="width:${pct(selected.relation)}%"></i></div><button class="primary-button" data-ui="interact" data-action="talk" data-id="${selected.id}">${icon('talk')}和 ${esc(selected.name)} 打个招呼</button><div class="social-actions"><button data-ui="social" data-action="chat" data-id="${selected.id}" title="聊聊近况 · 关系 +18">${icon('talk')}聊近况</button><button data-ui="social" data-action="compliment" data-id="${selected.id}" title="真诚赞美 · 关系 +12">${icon('smile')}赞美</button><button data-ui="social" data-action="gift" data-id="${selected.id}" title="小小心意 · 个人 ¥25 · 关系 +25" ${this.state.player.money < 25 ? 'disabled' : ''}>${icon('heart')}礼物 <small>¥25</small></button></div><button class="secondary-button" data-ui="social" data-action="invite" data-id="${selected.id}" ${!canInvite ? 'disabled' : ''}>${icon('home')}${this.state.interior?.guestId === selected.id ? 'TA 正在家中做客' : '邀请来家里坐坐'}</button><p class="social-note">${canInvite ? '在屋内可邀请朋友到访。' : '关系达到 35 后，回到自己的屋内即可邀请。'}室外交谈请先走近。</p><button class="secondary-button" data-ui="follow" data-id="${selected.id}">${icon('focus')}看看 TA 的生活</button><p class="inspect-description" style="margin-top:12px">城市视角下，右键点击地面可指挥 TA 沿街道移动。</p>`;
     }
+    if ('kind' in selected && selected.kind === 'busstop') html += `<button class="primary-button transit-inspect-button" data-ui="drawer" data-drawer="transit">${icon('bus')}查看公交线路与乘车</button>`;
     if (this.cache.get('inspector-content') !== html) { el.innerHTML = html; this.cache.set('inspector-content', html); }
   }
 
@@ -344,6 +377,7 @@ export class GameUI {
     el.classList.toggle('career-drawer', this.drawer === 'career');
     el.classList.toggle('journal-drawer', this.drawer === 'journal');
     el.classList.toggle('menu-drawer', this.drawer === 'menu');
+    el.classList.toggle('transit-drawer', this.drawer === 'transit');
     this.root.dataset.drawer = this.drawer || '';
     this.root.querySelector('.event-chip')!.setAttribute('aria-expanded', String(this.drawer === 'journal'));
     this.cache.delete('inspector-content');
@@ -352,6 +386,11 @@ export class GameUI {
     if (this.drawer === 'manage') {
       el.innerHTML = `${header('CITY HALL', '城市管理')}<div class="management-section"><h3>收支与税收</h3><div class="budget-total"><span>每日结余</span><strong id="budget-balance">—</strong></div><div class="budget-lines"><div><span>税收与经营</span><strong id="budget-income">—</strong></div><div><span>城市维护</span><strong id="budget-expenses">—</strong></div></div><div class="tax-control"><label for="tax-slider">居民税率 <strong id="tax-label">${this.state?.tax || 10}%</strong></label><input id="tax-slider" type="range" min="3" max="20" step="1" value="${this.state?.tax || 10}"/><div><span>更宜居</span><span>更多收入</span></div></div></div><div class="management-section"><h3>城市脉搏</h3><div id="city-services"></div></div><div class="management-section"><h3>安全与矫正</h3><div id="city-security"></div><div class="prison-intake-row"><span>接收新收押人员</span><button class="intake-toggle" data-ui="prison-intake" aria-pressed="false"><i></i><span id="prison-intake-label">暂停接收</span></button></div><div class="prison-regimes">${regimes.map(([value,label]) => `<button data-ui="prison-regime" data-regime="${value}" title="${label}">${label}</button>`).join('')}</div><p id="prison-policy-note" class="drawer-note"></p><div class="rehab-stats"><div><small>康复进度</small><strong id="prison-rehab">—</strong></div><div><small>不安程度</small><strong id="prison-unrest">—</strong></div><div><small>累计获释</small><strong id="prison-released">—</strong></div></div><div class="prison-schedule-heading"><span>每日生活安排</span><strong id="prison-phase">—</strong></div><div class="prison-schedule">${prisonSchedule.map(([time,phase]) => `<div data-prison-phase="${phase}"><small>${time}</small><span>${phase}</span><i></i></div>`).join('')}</div><p class="drawer-note">警局负责巡逻与治安，矫正中心提供收押与康复。课程和放风帮助居民重新开始。</p></div>`;
       el.insertAdjacentHTML('beforeend', `<div class="management-section"><h3>城市政策</h3><p class="policy-intro">每日投入，从一个更好的街区开始。</p><div class="policy-list">${(Object.keys(CITY_POLICIES) as CityPolicy[]).map(policy => {const def = CITY_POLICIES[policy]; return `<div class="policy-card"><button data-ui="policy" data-policy="${policy}" aria-pressed="false">${icon(def.icon)}<span>${def.name}</span><strong>¥ ${def.cost}<small>/日</small></strong><i></i></button><p>${def.description.replace(/^每日 ¥\d+，/, '')}</p></div>`;}).join('')}</div></div>`);
+      const budgetLines = el.querySelector('.budget-lines')!;
+      budgetLines.querySelector('div:first-child>span')!.textContent = '城市总收入';
+      budgetLines.querySelector('div:nth-child(2)>span')!.textContent = '城市总支出';
+      budgetLines.insertAdjacentHTML('beforeend', `<div class="budget-transit"><span>其中 · 公交票务</span><strong id="budget-transit-income">—</strong></div><div class="budget-transit"><span>其中 · 公交运营与维护</span><strong id="budget-transit-expenses">—</strong></div>`);
+      el.insertAdjacentHTML('beforeend', `<div class="management-section transit-management"><h3>公共交通</h3><div class="transit-management-stats"><div><small>居民覆盖</small><strong id="management-transit-coverage">—</strong></div><div><small>每日乘次</small><strong id="management-transit-riders">—</strong></div></div><p>票务与公交运营、站点维护已包含在城市收支合计中。</p><button class="secondary-button" data-ui="drawer" data-drawer="transit">${icon('bus')}线路、票价与乘车 ${icon('chevron')}</button></div>`);
       this.refreshManagement();
     } else if (this.drawer === 'furniture') {
       el.innerHTML = `${header('MAKE YOURSELF AT HOME', '慢慢，布置一个家')}<div class="drawer-wallet"><span>个人钱包</span><strong id="furniture-wallet">—</strong></div><p class="furniture-intro">家具会摆在房间的固定位置。走到旁边，按 <kbd>F</kbd> 或点击使用；出售返还一半购置费用。</p><div id="furniture-list" class="furniture-list"></div>`;
@@ -365,13 +404,17 @@ export class GameUI {
     } else if (this.drawer === 'journal') {
       el.innerHTML = `${header('LIFE HAPPENS HERE', '城市事件')}<div class="journal-overview"><span>每一个选择，都让城市继续生长。</span><small id="journal-summary"></small></div><div id="journal-active"></div><div id="journal-history"></div><p class="journal-footnote">阅读手记时城市时间暂停。需要亲自参与的活动，请先关闭面板，走到事件地点附近。</p>`;
       this.refreshJournal();
+    } else if (this.drawer === 'transit') {
+      el.innerHTML = `${header('THE CITY, A LITTLE CLOSER', '公共交通')}<p class="transit-intro">从一个街区，去往另一个日常。<br/>把至少两座车站接入同一道路网络，公交便会沿路运行。</p><div class="transit-operations"><div><strong>公交运营</strong><span id="transit-operating-label"></span></div><button class="transit-toggle" data-ui="transit-enabled" aria-pressed="false" aria-label="公交运营开关"><i></i><span id="transit-toggle-label"></span></button></div><div class="transit-fare"><div><span>单次票价</span><small>从个人钱包支付</small></div><div class="transit-fare-options" role="group" aria-label="选择公交票价">${[2,4,6].map(fare => `<button data-ui="transit-fare" data-fare="${fare}" aria-pressed="false">¥ ${fare}</button>`).join('')}</div></div><div class="transit-stat-grid"><div><small>居民覆盖</small><strong id="transit-coverage">—</strong></div><div><small>每日乘次</small><strong id="transit-riders">—</strong></div><div><small>每日票务收入</small><strong id="transit-income">—</strong></div><div><small>每日运营与维护</small><strong id="transit-expenses">—</strong></div></div><p class="transit-accounting">每日票务为居民客流预测。你的车费在上车时另记一次；运营与维护已计入城市总支出。</p><section class="transit-destinations"><div class="transit-section-heading"><h3>沿途与目的地</h3><span id="transit-stop-count"></span></div><div id="transit-boarding"></div><div id="transit-stops"></div></section><p class="transit-footnote">按 <kbd>T</kbd> 查看公交。户外走近运营站点 18 米内，再选择同一路网的目的地。阅读线路时城市暂停，乘车行程会继续。</p>`;
+      this.refreshTransit();
     } else if (this.drawer === 'help') {
       el.innerHTML = `${header('A LITTLE GUIDANCE', '在栖湾，慢慢来')}<div class="help-intro">建造一座理想的城市，<br/>也成为城市里生活的一个人。</div><div class="help-group"><h3>营造城市</h3><p><kbd>W A S D</kbd><span>移动城市视角</span></p><p><kbd>滚轮</kbd><span>拉近 / 拉远</span></p><p><kbd>右键拖动 / Q E</kbd><span>旋转视角</span></p><p><kbd>左键</kbd><span>建造 / 选择</span></p><p><kbd>ESC</kbd><span>取消建造 / 关闭面板</span></p></div><div class="help-group"><h3>走进生活</h3><p><kbd>1 / 2 / 3</kbd><span>切换三种视角</span></p><p><kbd>W A S D</kbd><span>行走</span></p><p><kbd>右键拖动 / Q E</kbd><span>环顾四周</span></p><p><kbd>第一人称</kbd><span>点击画面捕获鼠标</span></p><p><kbd>Shift</kbd><span>快走</span></p><p><kbd>F</kbd><span>人物 / 家具 / 家门互动</span></p><p><kbd>H</kbd><span>自家门口进屋 / 室内出门</span></p><p><kbd>R</kbd><span>回到焦点</span></p><p><kbd>空格</kbd><span>暂停 / 继续城市</span></p></div><div class="help-footer">先走近住宅，选择「把这里当作家」，再进入室内。<br/>在「装修住宅」添置家具，照顾五种生活需求。<br/>聊天、赞美和小礼物，让邻居成为朋友。</div>`;
     } else {
       el.innerHTML = `${header('HAVEN CITY', '留住这一刻')}<p class="menu-intro">每一段日常，都值得被记住。</p><div class="menu-actions"><button data-ui="save">${icon('save')}<span>保存城市<small>保存到此设备</small></span>${icon('chevron')}</button><button data-ui="load">${icon('load')}<span>读取存档<small>回到上次保存的栖湾</small></span>${icon('chevron')}</button><button data-ui="help">${icon('help')}<span>操作指南<small>关于建造和生活</small></span>${icon('chevron')}</button></div><section class="update-panel" aria-labelledby="update-heading"><div class="update-heading"><h3 id="update-heading">游戏更新</h3><span>v${esc(this.updater.version)}</span></div><div id="update-state" role="status" aria-live="polite" aria-atomic="true"></div></section>${this.confirming ? '<div class="reset-confirm"><strong>重新开始这座城市？</strong><p>重新开始将替换当前城市，并覆盖本机自动存档。</p><div><button class="secondary-button" data-ui="cancel-reset">继续生活</button><button class="danger-button" data-ui="reset">重新开始</button></div></div>' : `<button class="reset-link" data-ui="confirm-reset">${icon('reset')}重新开始</button>`}<div class="menu-footer"><span>栖湾市</span>城市与生活 · v${esc(this.updater.version)}</div>`;
       this.refreshUpdater();
     }
-    if (this.drawer === 'help') el.insertAdjacentHTML('beforeend', `<div class="help-group help-progression"><h3>成长与城市事件</h3><p><kbd>J</kbd><span>打开城市事件手记</span></p><div class="help-footer">从生活底栏打开「职业与技能」，选择职业方向。工作积累经验，阅读、烹饪和社交提升技能；升级会带来更好的收入。<br/>城市中的事件标记可点击查看。学校支持进修，消防站帮助应对火情。</div></div>`);
+    if (this.drawer === 'menu') el.querySelector('.update-panel')!.insertAdjacentHTML('beforebegin', `<section class="save-transfer"><h3>城市备份</h3><p>把城市随身带走，或从备份继续生活。<br/>导入会替换当前城市，建议先导出备份。</p><div><button data-ui="export-save">${icon('save')}导出备份</button><button data-ui="import-save">${icon('load')}导入备份</button></div><small>选择本地 JSON 备份文件，最大 2 MB。</small></section>`);
+    if (this.drawer === 'help') el.insertAdjacentHTML('beforeend', `<div class="help-group help-progression"><h3>成长与城市事件</h3><p><kbd>J</kbd><span>打开城市事件手记</span></p><div class="help-footer">从生活底栏打开「职业与技能」，选择职业方向。工作积累经验，阅读、烹饪和社交提升技能；升级会带来更好的收入。<br/>城市中的事件标记可点击查看。学校支持进修，消防站帮助应对火情。</div></div><div class="help-group help-transit"><h3>沿街道，去更远的日常</h3><p><kbd>T</kbd><span>公交线路、运营与目的地</span></p><div class="help-footer">在公共服务中建造车站，至少两站接入同一道路网络即可运营。户外走到运营车站 18 米内，打开公交选择目的地；乘车按单次票价扣个人资金，途中可以切换视角。</div><h3>把城市带在身边</h3><div class="help-footer">游戏菜单提供「导出备份」与「导入备份」。导入前先保存一份当前城市，确认后会用所选备份替换城市。</div></div>`);
     this.renderInspector();
   }
 
@@ -379,20 +422,20 @@ export class GameUI {
     if (this.drawer !== 'menu') return;
     const state = this.updateState;
     const names: Record<UpdateState['status'], string> = {idle:'让栖湾继续生长', checking:'正在检查更新', available:'发现新版本', current:'已是最新版本', downloading:'正在下载更新', downloaded:'更新已准备好', error:'暂时无法更新', unconfigured: this.updater.desktop ? '更新暂不可用' : '发布地址尚未配置'};
-    const description = state.message || ({idle:'手动检查 GitHub 上发布的正式版本。', checking:'正在连接 GitHub，请稍候…', available:'新版本已经发布。', current:'当前已是最新版本。', downloading:'下载完成后，由你决定何时重启安装。', downloaded:'安装前，请先保存当前城市。', error:'请检查网络后重试。', unconfigured:'配置公开 GitHub 仓库后即可检查更新。'} as const)[state.status];
+    const description = state.status === 'available' && !this.updater.desktop ? '新版本已发布。下载免安装 EXE，关闭游戏后替换原文件，双击即可继续游玩。' : (state.message || ({idle:'手动检查 GitHub 上发布的免安装 EXE。', checking:'正在连接 GitHub，请稍候…', available:'新版本已发布。下载后关闭游戏，替换免安装 EXE 即可。', current:'当前已是最新版本。', downloading:'下载后请先关闭游戏，再替换原文件。', downloaded:'先保存城市并关闭游戏，再替换免安装 EXE。', error:'请检查网络后重试。', unconfigured:'配置公开 GitHub 仓库后即可检查更新。'} as const)[state.status]).replace(/Windows 正式安装包|Windows 安装包/g, 'Windows 免安装 EXE');
     const busy = state.status === 'checking' || state.status === 'downloading';
     let controls = '';
     if (state.status === 'downloaded') {
-      controls = `<p class="update-save-note">安装会关闭并重启游戏。请先保存城市。</p><div class="update-actions"><button class="update-secondary" data-ui="save-before-update">${icon('save')}保存城市</button><button class="update-primary" data-ui="install-update" ${this.installingUpdate ? 'disabled' : ''}>${icon('reset')}${this.installingUpdate ? '正在准备安装…' : '重启并安装'}</button></div>`;
+      controls = `<p class="update-save-note">先保存并关闭游戏，再替换免安装 EXE。原有城市存档会保留。</p><div class="update-actions"><button class="update-secondary" data-ui="save-before-update">${icon('save')}保存城市</button>${state.releaseUrl ? `<a class="update-primary" data-ui="release-link" href="${esc(state.releaseUrl)}" target="_blank" rel="noopener noreferrer">下载免安装 EXE${icon('arrow')}</a>` : ''}</div>`;
     } else if (state.status === 'available') {
-      controls = `<div class="update-actions">${this.updater.desktop ? `<button class="update-primary" data-ui="download-update">${icon('load')}下载更新</button>` : state.releaseUrl ? `<a class="update-primary" data-ui="release-link" href="${esc(state.releaseUrl)}" target="_blank" rel="noopener noreferrer">${icon('load')}前往发布页下载</a>` : ''}${this.updater.desktop && state.releaseUrl ? `<a class="update-secondary" data-ui="release-link" href="${esc(state.releaseUrl)}" target="_blank" rel="noopener noreferrer">发布说明${icon('arrow')}</a>` : ''}</div>`;
+      controls = `<div class="update-actions">${this.updater.desktop ? `<button class="update-primary" data-ui="download-update">${icon('load')}下载免安装 EXE</button>` : state.releaseUrl ? `<a class="update-primary" data-ui="release-link" href="${esc(state.releaseUrl)}" target="_blank" rel="noopener noreferrer" title="前往 GitHub 发布页下载免安装 EXE">${icon('load')}下载免安装 EXE</a>` : ''}${this.updater.desktop && state.releaseUrl ? `<a class="update-secondary" data-ui="release-link" href="${esc(state.releaseUrl)}" target="_blank" rel="noopener noreferrer">发布说明${icon('arrow')}</a>` : ''}</div>`;
     } else if (state.status === 'downloading') {
       const progress = Math.round(state.progress || 0);
-      controls = `<div class="update-download-label"><span>下载进度</span><strong>${progress}%</strong></div><div class="update-progress" role="progressbar" aria-label="更新下载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><i style="width:${progress}%"></i></div><p class="update-note">下载后不会自动安装或重启。</p>`;
+      controls = `<div class="update-download-label"><span>下载进度</span><strong>${progress}%</strong></div><div class="update-progress" role="progressbar" aria-label="更新下载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress}"><i style="width:${progress}%"></i></div><p class="update-note">下载后先保存城市并关闭游戏，再替换原文件。</p>`;
     } else {
       controls = `<div class="update-actions"><button class="update-secondary" data-ui="check-update" ${busy ? 'disabled aria-busy="true"' : ''}>${icon(state.status === 'checking' ? 'reset' : 'load')}${state.status === 'checking' ? '正在检查…' : state.status === 'error' ? '重新检查' : '检查更新'}</button></div>`;
     }
-    this.patchInner('update-state', `<div class="update-status ${state.status}"><i></i><strong>${names[state.status]}</strong>${state.version && ['available','downloaded','downloading'].includes(state.status) ? `<span>v${esc(state.version)}</span>` : ''}</div><p class="update-description">${esc(description)}</p>${controls}${!this.updater.desktop && state.status !== 'unconfigured' ? '<p class="update-note">浏览器版需要手动下载 Windows 安装包。</p>' : ''}`);
+    this.patchInner('update-state', `<div class="update-status ${state.status}"><i></i><strong>${names[state.status]}</strong>${state.version && ['available','downloaded','downloading'].includes(state.status) ? `<span>v${esc(state.version)}</span>` : ''}</div><p class="update-description">${esc(description)}</p>${controls}${!this.updater.desktop && state.status !== 'unconfigured' ? '<p class="update-note">免安装 EXE 下载后双击即可游玩，替换文件时请先关闭游戏。</p>' : ''}`);
   }
 
   private refreshManagement() {
@@ -402,6 +445,10 @@ export class GameUI {
     set('budget-balance', `${s.income - s.expenses >= 0 ? '+' : '−'} ¥ ${number(Math.abs(s.income - s.expenses))}`);
     set('budget-income', `+ ¥ ${number(s.income)}`);
     set('budget-expenses', `− ¥ ${number(s.expenses)}`);
+    set('budget-transit-income', `+ ¥ ${number(s.transitIncome)}`);
+    set('budget-transit-expenses', `− ¥ ${number(s.transitExpenses)}`);
+    set('management-transit-coverage', `${Math.round(s.transitCoverage)}%`);
+    set('management-transit-riders', number(s.transitRiders));
     const service = (name: string, svg: string, value: string, rate: number) => `<div class="service-row">${icon(svg)}<span>${name}</span><strong>${value}</strong><div class="service-track"><i style="width:${pct(rate)}%" class="${rate < 35 ? 'warning' : ''}"></i></div></div>`;
     const services = service('电力', 'bolt', `${number(s.powerNeed)} / ${number(s.power)}`, s.powerNeed ? s.power / s.powerNeed * 100 : 100) + service('供水', 'water', `${number(s.waterNeed)} / ${number(s.water)}`, s.waterNeed ? s.water / s.waterNeed * 100 : 100) + service('就业', 'work', `${number(s.employed)} / ${number(s.population)}`, s.population ? s.employed / s.population * 100 : 100) + service('居住', 'home', `${number(s.population)} / ${number(s.capacity)}`, s.capacity ? (1 - s.population / s.capacity) * 70 + 30 : 0) + service('教育覆盖', 'help', `${Math.round(s.education)}%`, s.education) + service('消防覆盖', 'shield', `${Math.round(s.fireCoverage)}%`, s.fireCoverage);
     const security = `<div class="security-grid"><div><small>城市安全</small><strong>${Math.round(s.safety)}<span>%</span></strong></div><div><small>矫正中心</small><strong>${s.prisoners}<span> / ${s.prisonCapacity}</span></strong></div></div><div class="crime-line">犯罪指数 <strong>${Math.round(s.crime)}%</strong></div>`;
@@ -431,6 +478,90 @@ export class GameUI {
       button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
       button.title = `${active ? '关闭' : '启用'}${CITY_POLICIES[button.dataset.policy as CityPolicy].name}`;
     });
+  }
+
+  openTransit() {
+    this.drawer = 'transit'; this.confirming = false;
+    this.renderDrawer(); this.renderMission();
+  }
+
+  closeDrawer() {
+    this.drawer = null; this.confirming = false;
+    this.renderDrawer(); this.renderMission();
+  }
+
+  private refreshTransit() {
+    if (this.drawer !== 'transit' || !this.state) return;
+    const state = this.state, network = getTransitNetwork(state), transit = state.transit;
+    const distance = (stop: typeof network.stops[number]) => Math.hypot(state.player.x - cellToWorld(stop.gx), state.player.z - cellToWorld(stop.gz));
+    const nearby = !state.interior ? network.stops.filter(stop => stop.served && distance(stop) < 18).sort((a, b) => distance(a) - distance(b) || a.id - b.id)[0] : undefined;
+    const nearest = !state.interior ? network.stops.slice().sort((a, b) => distance(a) - distance(b) || a.id - b.id)[0] : undefined;
+    const toggle = this.root.querySelector<HTMLButtonElement>('[data-ui="transit-enabled"]')!;
+    toggle.classList.toggle('active', transit.enabled);
+    toggle.setAttribute('aria-pressed', String(transit.enabled));
+    toggle.setAttribute('aria-label', `${transit.enabled ? '暂停' : '开启'}公交运营`);
+    this.text('transit-toggle-label', transit.enabled ? '运营中' : '已停运');
+    this.text('transit-operating-label', transit.enabled ? network.routes.length ? `${network.routes.length} 条线路，沿真实道路运行` : '车站接通后即可发车' : '保留站点，暂停线路运营');
+    this.root.querySelectorAll<HTMLButtonElement>('[data-ui="transit-fare"]').forEach(button => {
+      const active = Number(button.dataset.fare) === transit.fare;
+      button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
+    });
+    this.text('transit-coverage', `${Math.round(network.coverage)}%`);
+    this.text('transit-riders', number(network.riders));
+    this.text('transit-income', `¥ ${number(network.income)}`);
+    this.text('transit-expenses', `¥ ${number(network.expenses)}`);
+    this.text('transit-stop-count', `${network.stops.filter(stop => stop.served).length} / ${network.stops.length} 站已接通`);
+    let boarding: string;
+    if (transit.journey) {
+      const destination = network.stops.find(stop => stop.id === transit.journey!.toId);
+      const progress = pct(transit.journey.distance > 0 ? transit.journey.travelled / transit.journey.distance * 100 : 0);
+      boarding = `<div class="transit-boarding-note in-transit">${icon('bus')}<span><strong>正在前往 ${esc(destination?.name || '目的地')}</strong><small>行程 ${Math.round(progress)}% · 可关闭面板，沿途看看这座城。</small><span class="transit-boarding-progress"><i style="width:${progress}%"></i></span></span></div>`;
+    } else if (!transit.enabled) {
+      boarding = `<div class="transit-boarding-note caution">${icon('pause')}<span><strong>公交暂时停运</strong><small>开启运营后恢复客流与乘车，站点维护费用仍会保留。</small></span></div>`;
+    } else if (!network.routes.length) {
+      boarding = `<div class="transit-boarding-note caution">${icon('road')}<span><strong>先让车站连起来</strong><small>至少两座已启用车站相邻同一片连通道路，才能形成线路。断开的道路不会自动相接。</small></span></div>`;
+    } else if (state.interior) {
+      boarding = `<div class="transit-boarding-note">${icon('home')}<span><strong>出门，再去下一站</strong><small>离开住宅后，走近任一运营车站即可选择目的地。</small></span></div>`;
+    } else if (this.mode === 'city') {
+      boarding = `<div class="transit-boarding-note">${icon('person')}<span><strong>以居民身份，搭乘公交</strong><small>按 2 或 3 走进城市，再走到运营车站 18 米内。</small></span></div>`;
+    } else if (nearby) {
+      boarding = `<div class="transit-boarding-note ready">${icon('bus')}<span><strong>从 ${esc(nearby.name)} 出发</strong><small>个人钱包 ¥ ${number(state.player.money)} · 每程 ¥ ${transit.fare}，上车时扣一次。</small></span></div>`;
+    } else {
+      boarding = `<div class="transit-boarding-note">${icon('person')}<span><strong>先走到车站附近</strong><small>${nearest ? `${esc(nearest.name)} 距角色约 ${Math.round(distance(nearest))} 米。` : ''}靠近运营站点 18 米内才能上车。</small></span></div>`;
+    }
+    this.patchInner('transit-boarding', boarding);
+    this.patchInner('transit-stops', network.stops.map(stop => {
+      const routeIndex = network.routes.findIndex(route => route.stopIds.includes(stop.id));
+      const sameRoute = nearby && network.routes.some(route => route.stopIds.includes(nearby.id) && route.stopIds.includes(stop.id));
+      const reason = transit.journey ? '行程进行中，到站后可再次乘车。' : !transit.enabled ? '公交暂停运营。' : state.interior ? '请先离开住宅。' : this.mode === 'city' ? '切换居民生活后乘车。' : !stop.served ? '至少两座车站需要接入同一片连通道路。' : !nearby ? '请走到运营站点 18 米内。' : stop.id === nearby.id ? '你已在本站附近。' : !sameRoute ? '与上车站道路不连通，无法直达。' : state.player.money < transit.fare ? `个人钱包需要至少 ¥ ${transit.fare}。` : '';
+      return `<article class="transit-stop ${nearby?.id === stop.id ? 'current' : ''} ${stop.served ? '' : 'disconnected'}"><div class="transit-stop-heading"><span class="transit-stop-mark">${icon('bus')}</span><div><strong>${esc(stop.name)}</strong><small>${stop.served ? `${routeIndex + 1} 号线${transit.enabled ? '' : ' · 已停运'}` : '等待道路连接'}${!state.interior ? ` · 距角色 ${Math.round(distance(stop))} m` : ''}</small></div>${nearby?.id === stop.id ? '<em>上车站</em>' : ''}</div><button data-ui="ride-transit" data-id="${stop.id}" data-destination-id="${stop.id}" ${reason ? 'disabled' : ''} title="${esc(reason || `乘车前往 ${stop.name}`)}">${icon(nearby?.id === stop.id ? 'check' : 'arrow')}<span>${nearby?.id === stop.id ? '当前上车站' : '乘车前往'}</span>${!reason ? `<strong>¥ ${transit.fare}</strong>` : ''}</button>${reason ? `<p class="transit-stop-reason">${esc(reason)}</p>` : ''}</article>`;
+    }).join('') || `<div class="transit-empty">${icon('bus')}<strong>第一站，从这里开始。</strong><p>在「公共服务」中建造街区公交站。沿道路连接至少两站，让居民开始乘车出行。</p></div>`);
+  }
+
+  private refreshJourney() {
+    if (!this.state) return;
+    const state = this.state, journey = state.transit.journey;
+    const hud = this.root.querySelector<HTMLElement>('#transit-journey')!;
+    let progress = 100;
+    if (journey) {
+      const destination = getTransitNetwork(state).stops.find(stop => stop.id === journey.toId)?.name || '目的地';
+      this.lastJourney = {destination, totalTrips: state.transit.totalTrips};
+      this.arrivalUntil = 0;
+      progress = pct(journey.distance > 0 ? journey.travelled / journey.distance * 100 : 0);
+      this.text('journey-title', `前往 ${destination}`);
+      this.text('journey-progress-label', `${Math.round(progress)}% · 余 ${Math.max(0, Math.ceil(journey.distance - journey.travelled))} m`);
+    } else if (this.lastJourney) {
+      if (state.transit.totalTrips > this.lastJourney.totalTrips) { this.arrivedAt = this.lastJourney.destination; this.arrivalUntil = performance.now() + 3600; }
+      this.lastJourney = null;
+    }
+    const arrived = !journey && performance.now() < this.arrivalUntil;
+    hud.hidden = !journey && !arrived;
+    this.root.dataset.journeyHud = String(!hud.hidden);
+    hud.classList.toggle('arrived', arrived);
+    if (arrived) { this.text('journey-title', `已到达 ${this.arrivedAt}`); this.text('journey-progress-label', '下车，继续生活'); }
+    const track = this.root.querySelector<HTMLElement>('#journey-progress')!;
+    track.setAttribute('aria-valuenow', String(Math.round(progress)));
+    track.querySelector<HTMLElement>('i')!.style.width = `${progress}%`;
   }
 
   private experienceMeter(xp: number, level: number) {
@@ -567,7 +698,7 @@ export class GameUI {
   }
 
   isModalOpen() { return this.drawer !== null; }
-  isSimulationPaused() { return this.drawer === 'manage' || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'career' || this.drawer === 'journal'; }
+  isSimulationPaused() { return (this.drawer === 'transit' && !this.state?.transit.journey) || this.drawer === 'manage' || this.drawer === 'menu' || this.drawer === 'help' || this.drawer === 'career' || this.drawer === 'journal'; }
 
   private drawMap() {
     if (!this.state) return;

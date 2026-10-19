@@ -1,8 +1,9 @@
 import { BUILDINGS, CAREERS, CITY_EVENTS, CITY_POLICIES, FURNITURE, PRISON_RULES, GRID, cellToWorld, worldToCell, wageFor, xpLevel } from './types.ts';
 import type { ActionResult, Building, BuildingKind, CareerTrack, CityEffect, CityEventKind, CityPolicy, CityStats, EventChoice, FurnitureKind, GameState, HomeInterior, Interaction, Mission, PrisonRegime, Progression, Resident, SkillKind, SocialAction, Speed } from './types.ts';
+import { getTransitNetwork, getTransitPath, transitPathLength } from './transit.ts';
 
 const SAVE_KEY = 'haven-city-save-v1';
-const VERSION = 3;
+const VERSION = 4;
 const STARTER_FURNITURE: FurnitureKind[] = ['bed', 'kitchen', 'sofa', 'shower', 'dining', 'plant'];
 const COLORS = ['#d88d61', '#668fa0', '#b68c9b', '#858f68', '#cdb26b', '#8d8db4', '#658b7c', '#c27d72'];
 const NAMES = ['林知夏', '陈望舒', '周屿', '许清和', '苏小满', '沈南风', '顾星河', '宋时雨', '叶晨', '陆一帆', '江晚', '温予安', '程嘉树', '夏可', '李思远', '唐晴', '何沐', '徐知行', '方悦', '吴桐', '赵宁', '谢川', '郑岚', '梁初', '白舟', '孟秋', '孙墨', '蔡明', '季然', '秦月', '韩松', '朱禾'];
@@ -16,6 +17,18 @@ const isFurnitureKind = (value: unknown): value is FurnitureKind => typeof value
 const isRegime = (value: unknown): value is PrisonRegime => typeof value === 'string' && Object.hasOwn(PRISON_RULES, value);
 const isLand = (gx: number, gz: number) => Number.isInteger(gx) && Number.isInteger(gz) && gx >= 0 && gx < GRID - 1 && gz >= 1 && gz < GRID - 1;
 const worldPoint = (b: Building): Point => ({ x: cellToWorld(b.gx), z: cellToWorld(b.gz) });
+const pointAlong = (path: Point[], travelled: number): { point: Point; yaw: number } => {
+  let remaining = travelled;
+  for (let i = 1; i < path.length; i++) {
+    const start = path[i - 1], end = path[i], length = distance(start, end);
+    if (remaining <= length || i === path.length - 1) {
+      const fraction = length ? clamp(remaining / length, 0, 1) : 1;
+      return { point: { x: start.x + (end.x - start.x) * fraction, z: start.z + (end.z - start.z) * fraction }, yaw: Math.atan2(end.x - start.x, end.z - start.z) };
+    }
+    remaining -= length;
+  }
+  return { point: path[0] ?? { x: -5, z: 5 }, yaw: 0 };
+};
 const lifeMissions = (): Mission[] => [
   { id: 'settle', title: '城市里的家', description: '认领一处住宅，第一次走进自己的家。', target: 1, progress: 0, reward: 1000, completed: false },
   { id: 'decorate', title: '理想生活空间', description: '在家中选购两件家具，布置自己的生活。', target: 2, progress: 0, reward: 1200, completed: false },
@@ -48,6 +61,7 @@ export class Simulation {
     if (saved && this.validSave(saved)) this.state = this.sanitize(saved);
     this.rebuildRoadMap();
     this.refreshConnections();
+    this.reconcileJourney();
     this.updateStats();
     this.assignResidents();
     this.updatePrison(0);
@@ -102,12 +116,14 @@ export class Simulation {
       stats: this.emptyStats(), missions, notices: [{ id: id++, text: '欢迎来到栖湾！建设城市，或切换生活视角认识你的邻居。', kind: 'info', time: 0 }],
       nextId: id, elapsed: 0, weather: '晴朗', homes: [], interior: null,
       prison: { intake: true, regime: 'balanced', unrest: 8, rehabilitation: 40, released: 0, phase: '劳动' },
-      progression: freshProgression(), civic: { policies: { green: false, education: false, community: false }, events: [event], effects: [], nextEventAt: 60, sequence: 0, resolved: 0 } };
+      progression: freshProgression(), civic: { policies: { green: false, education: false, community: false }, events: [event], effects: [], nextEventAt: 60, sequence: 0, resolved: 0 },
+      transit: { enabled: true, fare: 4, totalTrips: 0, journey: null } };
   }
 
   private emptyStats(): CityStats {
     return { population: 0, capacity: 0, jobs: 0, employed: 0, happiness: 0, income: 0, expenses: 0,
-      power: 0, powerNeed: 0, water: 0, waterNeed: 0, safety: 0, prisoners: 0, prisonCapacity: 0, crime: 0, landValue: 0, education: 20, fireCoverage: 0 };
+      power: 0, powerNeed: 0, water: 0, waterNeed: 0, safety: 0, prisoners: 0, prisonCapacity: 0, crime: 0, landValue: 0, education: 20, fireCoverage: 0,
+      transitCoverage: 0, transitRiders: 0, transitIncome: 0, transitExpenses: 0 };
   }
 
   tick(dt: number): void {
@@ -135,6 +151,7 @@ export class Simulation {
       p.social = clamp(p.social - hours * .6);
       p.hygiene = clamp(p.hygiene - hours * .9);
       p.joy = clamp(p.joy - hours * (.5 + (p.hygiene < 25 ? .8 : 0)));
+      this.moveTransit(step / this.state.speed);
       this.moveResidents(step);
       this.arrivals += hours;
       if (this.arrivals >= 2) {
@@ -169,6 +186,7 @@ export class Simulation {
     this.state.buildings.push(building);
     this.rebuildRoadMap();
     this.refreshConnections();
+    this.reconcileJourney();
     this.assignResidents();
     this.updateStats();
     this.updateMissions();
@@ -194,6 +212,7 @@ export class Simulation {
     this.commands.clear();
     this.rebuildRoadMap();
     this.refreshConnections();
+    this.reconcileJourney();
     if (this.state.interior && !this.state.buildings.find(home => home.id === this.state.interior!.homeId)?.active) this.exitHome();
     this.assignResidents();
     this.updateStats();
@@ -221,6 +240,7 @@ export class Simulation {
   }
 
   enterHome(id: number | undefined = this.state.player.homeId ?? undefined): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请到站后再回家。');
     if (this.state.interior) return this.result(false, '你已经在家中，走到门边即可离开。');
     const home = this.state.buildings.find(b => b.id === id && (b.kind === 'home' || b.kind === 'apartment'));
     if (!home || home.id !== this.state.player.homeId) return this.result(false, '请先在附近认领这处住宅，再进入自己的家。');
@@ -261,7 +281,7 @@ export class Simulation {
     if (cost > 0 && this.state.money < cost) return this.result(false, `市政资金不足，这个方案需要 ¥${cost.toLocaleString()}。`);
     if (choice === 'dispatch' && !this.count('firestation')) return this.result(false, '需要一座接通道路的消防站，才能派出消防队。');
     if (choice === 'volunteer') {
-      if (this.state.interior || !target || distance(this.state.player, worldPoint(target)) > 18) return this.result(false, '请走到活动公园 18 米内，亲自参与邻里节。');
+      if (this.state.interior || this.state.transit.journey || !target || distance(this.state.player, worldPoint(target)) > 18) return this.result(false, '请走到活动公园 18 米内，亲自参与邻里节。');
       if (this.state.player.energy < 20) return this.result(false, '参与活动需要 20 点精力，请先休息。');
       this.state.player.energy -= 20;
       this.state.player.social = clamp(this.state.player.social + 25);
@@ -282,6 +302,7 @@ export class Simulation {
   }
 
   private study(targetId?: number): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请到站后再参加进修。');
     if (this.state.interior) return this.result(false, '请先出门，到社区学校参加进修。');
     if (!this.nearest(['school'], 18, targetId)) return this.result(false, '走到一所已接通道路的社区学校 18 米内，再参加进修。');
     if ((this.cooldowns.get('study') ?? 0) > this.state.elapsed) return this.result(false, '先消化刚学到的知识，稍后再来进修。');
@@ -353,6 +374,7 @@ export class Simulation {
   }
 
   exitHome(): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请等待到站。');
     const interior = this.state.interior;
     if (!interior) return this.result(false, '你现在已经在城市街区中。');
     this.state.player.x = interior.returnX;
@@ -364,6 +386,7 @@ export class Simulation {
   }
 
   buyFurniture(kind: FurnitureKind): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请到站后再布置家中。');
     if (!isFurnitureKind(kind)) return this.result(false, '没有找到这件家具。');
     const home = this.currentHome();
     if (!home) return this.result(false, '先进入自己家中，再选购与布置家具。');
@@ -377,6 +400,7 @@ export class Simulation {
   }
 
   sellFurniture(id: number): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请到站后再管理家具。');
     const home = this.currentHome();
     if (!home) return this.result(false, '请在自己家中管理家具。');
     const index = home.furniture.findIndex(f => f.id === id);
@@ -389,6 +413,7 @@ export class Simulation {
   }
 
   useFurniture(id: number): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请到站后再使用家具。');
     const home = this.currentHome();
     const furniture = home?.furniture.find(f => f.id === id);
     if (!furniture) return this.result(false, '请先走进自己家中，再使用这里的家具。');
@@ -430,6 +455,7 @@ export class Simulation {
   }
 
   socialize(action: SocialAction, id: number): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请到站后再与邻居交流。');
     if (!['chat', 'compliment', 'gift', 'invite'].includes(action)) return this.result(false, '暂时无法进行这种交流。');
     const resident = this.state.residents.find(r => r.id === id);
     if (!resident) return this.result(false, '这位居民暂时不在城中。');
@@ -524,6 +550,8 @@ export class Simulation {
   }
 
   interact(action: Interaction, targetId?: number): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '正在乘坐公交，请等待到站后再进行生活活动。');
+    if (action === 'transit') return this.result(false, '请打开公交面板，选择同一路线上的目的站。');
     const p = this.state.player;
     if (action === 'study') return this.study(targetId);
     if (action === 'enter') return this.enterHome(targetId);
@@ -619,6 +647,79 @@ export class Simulation {
     return this.result(false, '暂时无法执行这个行动。');
   }
 
+  setTransitEnabled(enabled: boolean): ActionResult {
+    if (typeof enabled !== 'boolean') return this.result(false, '公交运营开关无效。');
+    this.state.transit.enabled = enabled;
+    if (!enabled && this.state.transit.journey) this.endTransit(false);
+    this.updateStats();
+    return this.result(true, enabled ? '公交已开始运营，接入同一道路网络的两座车站即可开通线路。' : '公交已暂停运营，车站仍需日常维护。');
+  }
+
+  setTransitFare(fare: number): ActionResult {
+    if (![2, 4, 6].includes(fare)) return this.result(false, '公交票价请选择 ¥2、¥4 或 ¥6。');
+    this.state.transit.fare = fare;
+    this.updateStats();
+    return this.result(true, `公交票价已调整为 ¥${fare}，在途乘客保留上车时的票价。`);
+  }
+
+  rideTransit(destinationId: number): ActionResult {
+    if (this.state.transit.journey) return this.result(false, '你已经在公交车上，请等待到站。');
+    if (this.state.interior) return this.result(false, '请先出门，走到公交站旁再乘车。');
+    if (!this.state.transit.enabled) return this.result(false, '公交暂未运营，请先启用公交服务。');
+    const network = getTransitNetwork(this.state);
+    const stopPoint = (stop: { gx: number; gz: number }) => ({ x: cellToWorld(stop.gx), z: cellToWorld(stop.gz) });
+    const origin = network.stops.filter(stop => stop.served && distance(this.state.player, stopPoint(stop)) < 18)
+      .sort((a, b) => distance(this.state.player, stopPoint(a)) - distance(this.state.player, stopPoint(b)))[0];
+    if (!origin) return this.result(false, '走到已开通的公交站 18 米内，再选择目的站。');
+    const path = getTransitPath(this.state, origin.id, destinationId);
+    if (!path) return this.result(false, '目的站需要与起点站不同，且接入同一条连通的公交线路。');
+    const fare = this.state.transit.fare;
+    if (this.state.player.money < fare) return this.result(false, `乘车需要个人钱包 ¥${fare}。`);
+    this.state.player.money -= fare;
+    this.state.money += fare;
+    this.state.transit.journey = { fromId: origin.id, toId: destinationId, path, distance: transitPathLength(path), travelled: 0, fare };
+    this.state.player.x = path[0].x; this.state.player.z = path[0].z;
+    this.state.player.yaw = pointAlong(path, 0).yaw;
+    return this.result(true, `已上车，个人钱包 −¥${fare}。公交正沿道路前往目的站。`);
+  }
+
+  private reconcileJourney(): void {
+    const journey = this.state.transit.journey;
+    if (!journey) return;
+    const path = getTransitPath(this.state, journey.fromId, journey.toId);
+    if (!this.state.transit.enabled || !path || path.length !== journey.path.length
+      || path.some((p, i) => distance(p, journey.path[i]) > .001)) this.endTransit(false);
+  }
+
+  private moveTransit(realSeconds: number): void {
+    this.reconcileJourney();
+    const journey = this.state.transit.journey;
+    if (!journey) return;
+    journey.travelled = Math.min(journey.distance, journey.travelled + realSeconds * 20);
+    const position = pointAlong(journey.path, journey.travelled);
+    Object.assign(this.state.player, position.point, { yaw: position.yaw });
+    if (journey.travelled >= journey.distance - .00001) this.endTransit(true);
+  }
+
+  private endTransit(arrived: boolean): void {
+    const journey = this.state.transit.journey;
+    if (!journey) return;
+    const road = this.nearestRoad(this.state.player);
+    const destination = arrived ? this.state.buildings.find(b => b.id === journey.toId && b.kind === 'busstop') : undefined;
+    if (road) {
+      const center = worldPoint(road), target = destination ? worldPoint(destination) : { x: center.x + 1, z: center.z };
+      const length = distance(center, target) || 1;
+      this.state.player.x = center.x + (target.x - center.x) / length * 3.3;
+      this.state.player.z = center.z + (target.z - center.z) / length * 3.3;
+    }
+    this.state.transit.journey = null;
+    if (arrived) {
+      this.state.transit.totalTrips++;
+      this.state.player.energy = clamp(this.state.player.energy + 8);
+      this.notify('公交已到站。精力 +8，可以继续步行探索街区。', 'good');
+    } else this.notify('公交线路发生变化，已在附近安全位置下车。', 'info');
+  }
+
   setSpeed(speed: Speed): void { if (speed === 0 || speed === 1 || speed === 3) this.state.speed = speed; }
 
   setTax(tax: number): void {
@@ -635,6 +736,45 @@ export class Simulation {
     } catch { return this.result(false, '保存失败：浏览器存储空间不可用。'); }
   }
 
+  exportSave(): string { return JSON.stringify(this.state, null, 2); }
+
+  /** Imports replace both the current city and its local save only after complete validation. */
+  importSave(json: string): ActionResult {
+    const failure = (message: string): ActionResult => ({ ok: false, message });
+    if (typeof json !== 'string' || json.length > 2 * 1024 * 1024 || new TextEncoder().encode(json).length > 2 * 1024 * 1024) return failure('备份文件过大，请选择小于 2 MB 的栖湾市 JSON 存档。');
+    let previous: string | null = null;
+    let captured = false;
+    try {
+      const saved: unknown = JSON.parse(json);
+      if (!this.validSave(saved)) return failure('备份格式不兼容或内容损坏，当前城市与本地存档已保留。');
+      const candidate = new Simulation(saved);
+      if (typeof localStorage === 'undefined') return failure('本地存储不可用，未覆盖当前城市。请先恢复存储权限。');
+      previous = localStorage.getItem(SAVE_KEY); captured = true;
+      // A normal Storage.setItem is atomic. Keep the previous value for exceptional storage adapters too.
+      localStorage.setItem(SAVE_KEY, JSON.stringify(candidate.state));
+      this.replaceState(candidate.state);
+      return this.result(true, '备份已导入，当前城市与本地存档均已替换。');
+    } catch {
+      if (captured) try {
+        if (previous === null) localStorage.removeItem(SAVE_KEY);
+        else localStorage.setItem(SAVE_KEY, previous);
+      } catch { /* Storage failures never replace the live city. */ }
+      return failure('导入失败，当前城市已保留。请检查文件内容和本地存储空间。');
+    }
+  }
+
+  private replaceState(state: GameState): void {
+    this.state = state;
+    this.clearTransient();
+    this.rebuildRoadMap();
+    this.refreshConnections();
+    this.reconcileJourney();
+    this.updateStats();
+    this.assignResidents();
+    this.updatePrison(0);
+    this.restoreVisit();
+  }
+
   load(): ActionResult {
     try {
       if (typeof localStorage === 'undefined') return this.result(false, '当前浏览器暂不支持读取本地存档。');
@@ -642,14 +782,7 @@ export class Simulation {
       if (!raw) return this.result(false, '还没有存档，先保存一次你正在建设的城市吧。');
       const saved: unknown = JSON.parse(raw);
       if (!this.validSave(saved)) return this.result(false, '存档格式不兼容或内容损坏，当前城市已保留。');
-      this.state = this.sanitize(saved);
-      this.clearTransient();
-      this.rebuildRoadMap();
-      this.refreshConnections();
-      this.updateStats();
-      this.assignResidents();
-      this.updatePrison(0);
-      this.restoreVisit();
+      this.replaceState(this.sanitize(saved));
       return this.result(true, '存档已载入，欢迎回到栖湾。');
     } catch { return this.result(false, '读取失败：存档不可用，当前城市已保留。'); }
   }
@@ -703,6 +836,7 @@ export class Simulation {
     const capacity = active.reduce((n, b) => n + (b.kind === 'home' || b.kind === 'apartment' ? this.capacity(b) : 0), 0);
     const jobs = active.reduce((n, b) => n + this.jobs(b), 0);
     const civic = this.state.civic;
+    const transit = getTransitNetwork(this.state);
     const pendingFires = civic.events.filter(e => e.status === 'pending' && e.kind === 'fire').length;
     const power = Math.round(this.units('power') * BUILDINGS.power.capacity * (civic.events.some(e => e.status === 'pending' && e.kind === 'outage') ? .75 : 1));
     const water = this.units('water') * BUILDINGS.water.capacity;
@@ -722,14 +856,16 @@ export class Simulation {
     const happiness = Math.round(clamp(53 + Math.min(18, this.units('park') * 6) + Math.min(8, this.units('clinic') * 8)
       + (population ? employed / population * 12 : 8) + safety * .08 - Math.max(0, this.state.tax - 9) * 3
       - (1 - supplied) * 36 - Math.max(0, population - capacity) * 4 + (civic.policies.green ? 3 : 0) + (this.hasEffect('celebration') ? 8 : 0)
-      + (this.hasEffect('learning') ? 3 : 0) - (this.hasEffect('rationing') ? 5 : 0) - (this.hasEffect('disruption') ? 4 : 0) - pendingFires * 3, 5, 99));
-    const income = Math.round((population * (this.state.tax * 3.5) + employed * 18 + this.units('shop') * 120 + this.units('office') * 180 + prisoners * policy.grant) * (this.hasEffect('rationing') ? .9 : 1));
+      + (this.hasEffect('learning') ? 3 : 0) + Math.min(4, transit.coverage * .04) - (this.hasEffect('rationing') ? 5 : 0) - (this.hasEffect('disruption') ? 4 : 0) - pendingFires * 3, 5, 99));
+    const income = Math.round((population * (this.state.tax * 3.5) + employed * 18 + this.units('shop') * 120 + this.units('office') * 180 + prisoners * policy.grant) * (this.hasEffect('rationing') ? .9 : 1)) + transit.income;
     const policyCost = (Object.keys(CITY_POLICIES) as CityPolicy[]).reduce((n, key) => n + (civic.policies[key] ? CITY_POLICIES[key].cost : 0), 0);
-    const expenses = Math.round(active.reduce((n, b) => n + BUILDINGS[b.kind].upkeep * (1 + .6 * (b.level - 1)) * (b.kind === 'prison' ? policy.upkeep : 1), 0) + prisoners * policy.perPerson + policyCost);
+    const expenses = Math.round(active.filter(b => b.kind !== 'busstop').reduce((n, b) => n + BUILDINGS[b.kind].upkeep * (1 + .6 * (b.level - 1)) * (b.kind === 'prison' ? policy.upkeep : 1), 0) + prisoners * policy.perPerson + policyCost) + transit.expenses;
     const education = Math.round(clamp(20 + this.units('school') * BUILDINGS.school.capacity / Math.max(1, population) * 50));
     const fireCoverage = Math.min(100, this.units('firestation') * 35);
     Object.assign(this.state.stats, { population, capacity, jobs, employed, happiness, income, expenses, power, powerNeed,
-      water, waterNeed, safety: Math.round(safety), prisoners, prisonCapacity, crime, education, fireCoverage, landValue: Math.round(620 + happiness * 12 + this.count('park') * 80) });
+      water, waterNeed, safety: Math.round(safety), prisoners, prisonCapacity, crime, education, fireCoverage,
+      transitCoverage: transit.coverage, transitRiders: transit.riders, transitIncome: transit.income, transitExpenses: transit.expenses,
+      landValue: Math.round(620 + happiness * 12 + this.count('park') * 80) });
     for (const r of this.state.residents) r.mood = happiness;
   }
 
@@ -948,7 +1084,7 @@ export class Simulation {
   private validSave(value: unknown): value is GameState {
     if (!value || typeof value !== 'object') return false;
     const s = value as GameState;
-    if (![1, 2, VERSION].includes(s.version) || !finite(s.money) || Math.abs(s.money) > 1e12 || !finite(s.day) || s.day < 1 || !finite(s.hour) || s.hour < 0 || s.hour >= 24
+    if (![1, 2, 3, VERSION].includes(s.version) || !finite(s.money) || Math.abs(s.money) > 1e12 || !finite(s.day) || s.day < 1 || !finite(s.hour) || s.hour < 0 || s.hour >= 24
       || !finite(s.tax) || s.tax < 3 || s.tax > 20 || ![0, 1, 3].includes(s.speed) || !finite(s.elapsed) || s.elapsed < 0 || s.elapsed > 1e9
       || !Number.isSafeInteger(s.nextId) || s.nextId < 1 || s.nextId > 1e12 || !Array.isArray(s.buildings) || s.buildings.length > 530
       || !Array.isArray(s.residents) || s.residents.length > 1200 || !Array.isArray(s.missions) || s.missions.length > 20
@@ -1002,7 +1138,7 @@ export class Simulation {
         || !Number.isInteger(prison.released) || prison.released < 0
         || !['早餐', '劳动', '课程', '放风', '休息'].includes(prison.phase) || !Number.isInteger(s.stats.prisoners)) return false;
     }
-    if (s.version === VERSION) {
+    if (s.version >= 3) {
       const progression = s.progression;
       const validXP = (xp: unknown) => finite(xp) && xp >= 0 && xp <= 1e7;
       if (!progression || !ownKey(CAREERS, progression.career) || !progression.careers || !progression.skills
@@ -1040,6 +1176,26 @@ export class Simulation {
           || !['celebration', 'rationing', 'learning', 'disruption'].includes(effect.kind)
           || !finite(effect.until) || effect.until <= s.elapsed || effect.until > s.elapsed + (effect.kind === 'celebration' || effect.kind === 'learning' ? 240.001 : 120.001)) return false;
         ids.add(effect.id);
+      }
+    }
+    if (s.version >= 4) {
+      const transit = s.transit;
+      if (!transit || typeof transit.enabled !== 'boolean' || ![2, 4, 6].includes(transit.fare)
+        || !Number.isSafeInteger(transit.totalTrips) || transit.totalTrips < 0 || transit.totalTrips > 1e9
+        || !finite(s.stats.transitCoverage) || s.stats.transitCoverage < 0 || s.stats.transitCoverage > 100
+        || !Number.isSafeInteger(s.stats.transitRiders) || s.stats.transitRiders < 0 || s.stats.transitRiders > 1e6
+        || ![s.stats.transitIncome, s.stats.transitExpenses].every(n => finite(n) && n >= 0 && n <= 1e12)) return false;
+      if (transit.journey !== null) {
+        const journey = transit.journey;
+        if (!journey || !transit.enabled || s.interior !== null || !Number.isSafeInteger(journey.fromId) || !Number.isSafeInteger(journey.toId)
+          || ![2, 4, 6].includes(journey.fare) || !Array.isArray(journey.path) || journey.path.length < 2 || journey.path.length > 530
+          || !finite(journey.distance) || journey.distance <= 0 || journey.distance > 6000
+          || !finite(journey.travelled) || journey.travelled < 0 || journey.travelled >= journey.distance
+          || !journey.path.every(p => p && validWorld(p.x, p.z))) return false;
+        const canonical = getTransitPath(s, journey.fromId, journey.toId);
+        if (!canonical || canonical.length !== journey.path.length || canonical.some((p, i) => distance(p, journey.path[i]) > .00001)
+          || Math.abs(transitPathLength(canonical) - journey.distance) > .00001
+          || distance(pointAlong(canonical, journey.travelled).point, s.player) > .01) return false;
       }
     }
     const missionIds = new Set<string>();
@@ -1088,6 +1244,11 @@ export class Simulation {
         returnZ: copy.interior.returnZ, guestId: copy.interior.guestId } : null,
       prison: legacy ? { intake: true, regime: 'balanced', unrest: 8, rehabilitation: 40, released: 0, phase: '劳动' }
         : { intake: copy.prison.intake, regime: copy.prison.regime, unrest: copy.prison.unrest,
-          rehabilitation: copy.prison.rehabilitation, released: copy.prison.released, phase: copy.prison.phase }, progression, civic };
+          rehabilitation: copy.prison.rehabilitation, released: copy.prison.released, phase: copy.prison.phase }, progression, civic,
+      transit: copy.version < 4 ? { enabled: true, fare: 4, totalTrips: 0, journey: null }
+        : { enabled: copy.transit.enabled, fare: copy.transit.fare, totalTrips: copy.transit.totalTrips,
+          journey: copy.transit.journey ? { fromId: copy.transit.journey.fromId, toId: copy.transit.journey.toId,
+            path: getTransitPath(copy, copy.transit.journey.fromId, copy.transit.journey.toId)!,
+            distance: copy.transit.journey.distance, travelled: copy.transit.journey.travelled, fare: copy.transit.journey.fare } : null } };
   }
 }

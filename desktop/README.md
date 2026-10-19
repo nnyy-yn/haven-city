@@ -1,6 +1,6 @@
 # 栖湾市 Windows 桌面版
 
-独立 Electron 外壳，读取 `game/index.html` 离线游戏。安装版支持手动检查、下载和确认重启更新；Portable 版检查版本后打开 GitHub 发行页，下载后关闭游戏并手动替换 EXE。两种版本都把存档保存在当前 Windows 用户的应用数据中。
+独立 Electron 外壳，读取 `game/index.html` 离线游戏。当前只发布单文件 Portable EXE，下载后双击即可玩。更新按钮独立检查 GitHub 正式发行及相应的免安装 EXE，发现新版后打开发行页，下载后关闭游戏并手动替换 EXE；不依赖安装包或 `latest.yml`。存档保存在当前 Windows 用户的应用数据中。
 
 `window.havenDesktop` 提供 `version`、`getUpdateState()`、`checkForUpdates()`、`downloadUpdate()`、`installUpdate()`、`onUpdateState(callback)`。最后一个方法返回取消监听函数。状态为 `idle | checking | available | current | downloading | downloaded | error | unconfigured`，可带 `version`、`progress`（0–100）、`message`、`releaseUrl`。
 

@@ -12,9 +12,9 @@ module.exports = {
   asar: true,
   compression: 'maximum',
   directories: { output: 'release', buildResources: 'assets' },
-  files: ['main.cjs', 'preload.cjs', 'update-controller.cjs', 'release-settings.cjs', 'release-config.json', 'assets/icon.ico', 'game/**/*', 'package.json'],
+  files: ['main.cjs', 'preload.cjs', 'update-controller.cjs', 'portable-release.cjs', 'release-settings.cjs', 'release-config.json', 'assets/icon.ico', 'game/**/*', 'package.json'],
   win: {
-    target: [{ target: 'nsis', arch: ['x64'] }, { target: 'portable', arch: ['x64'] }],
+    target: [{ target: 'portable', arch: ['x64'] }],
     icon: 'assets/icon.ico',
     requestedExecutionLevel: 'asInvoker'
   },

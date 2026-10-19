@@ -1,6 +1,6 @@
 {
   "name": "haven-city-desktop",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "栖湾市 · 离线城市与居民生活模拟",
   "author": "Haven City",
@@ -9,7 +9,7 @@
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --config electron-builder.cjs --dir --win --x64 --publish never",
-    "build:win": "electron-builder --config electron-builder.cjs --win nsis portable --x64 --publish never",
+    "build:win": "electron-builder --config electron-builder.cjs --win portable --x64 --publish never",
     "test": "node --test test/*.test.cjs"
   },
   "dependencies": { "electron-updater": "6.8.9" },

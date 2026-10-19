@@ -88,7 +88,7 @@ export function safeReleaseUrl(value: unknown, repository: ReleaseRepository): s
   return (path.parts.length === 4 && path.parts[3] === 'latest') || (path.parts.length === 5 && path.parts[3] === 'tag') ? path.url : undefined;
 }
 
-/** Validate untrusted API data before exposing an installer or a release link. */
+/** Validate untrusted API data before exposing a portable EXE or a release link. */
 export function normalizeRelease(raw: unknown, repository: ReleaseRepository): NormalizedRelease | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !validRepository(repository)) return null;
   const release = raw as Record<string, unknown>;
@@ -100,7 +100,7 @@ export function normalizeRelease(raw: unknown, repository: ReleaseRepository): N
   for (const rawAsset of release.assets) {
     if (!rawAsset || typeof rawAsset !== 'object' || Array.isArray(rawAsset)) continue;
     const asset = rawAsset as Record<string, unknown>;
-    if (typeof asset.name !== 'string' || !/\.exe$/i.test(asset.name) || /[/\\\u0000-\u001f\u007f]/.test(asset.name)) continue;
+    if (asset.name !== `HavenCity-Portable-${version.version}-x64.exe`) continue;
     const download = githubPath(asset.browser_download_url, repository);
     if (!download || download.parts.length !== 6 || download.parts[3] !== 'download' || download.parts[4] !== release.tag_name || download.parts[5] !== asset.name) continue;
     return {version: version.version, releaseUrl: page.url, assetUrl: download.url, assetName: asset.name};
@@ -124,9 +124,9 @@ export async function queryLatestRelease(config: ReleaseConfig, fetcher: typeof 
       return {status: 'error', message};
     }
     const release = normalizeRelease(await response.json(), config);
-    if (!release) return {status: 'error', message: '发布信息中没有有效的 Windows 正式安装包，请稍后重试。'};
+    if (!release) return {status: 'error', message: '发布信息中没有有效的免安装 EXE，请稍后重试。'};
     return compareVersions(release.version, config.version)! > 0
-      ? {status: 'available', version: release.version, releaseUrl: release.releaseUrl, message: '新版本已发布，可前往 GitHub 发布页下载 Windows 安装包。'}
+      ? {status: 'available', version: release.version, releaseUrl: release.releaseUrl, message: '新版本已发布，可前往 GitHub 下载免安装 EXE，关闭游戏后替换。'}
       : {status: 'current', version: config.version, releaseUrl: release.releaseUrl, message: '当前已是最新版本。'};
   } catch (error) {
     return {status: 'error', message: controller.signal.aborted ? '连接 GitHub 超时，请重试。' : '无法连接 GitHub，请检查网络后重试。'};

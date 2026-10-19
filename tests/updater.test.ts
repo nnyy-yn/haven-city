@@ -10,8 +10,8 @@ const release = (tag = 'v1.3.0') => ({
   prerelease: false,
   html_url: `https://github.com/haven-city/haven-city/releases/tag/${tag}`,
   assets: [{
-    name: 'HavenCity-Setup.exe',
-    browser_download_url: `https://github.com/haven-city/haven-city/releases/download/${tag}/HavenCity-Setup.exe`,
+    name: `HavenCity-Portable-${tag.replace(/^v/, '')}-x64.exe`,
+    browser_download_url: `https://github.com/haven-city/haven-city/releases/download/${tag}/HavenCity-Portable-${tag.replace(/^v/, '')}-x64.exe`,
     content_type: 'application/octet-stream',
     state: 'uploaded',
   }],
@@ -61,9 +61,9 @@ test('release normalization selects a stable Windows installer from the configur
   const normalized = normalizeRelease(release(), repository);
   assert.ok(normalized);
   assert.equal(compareVersions(normalized.version, '1.3.0'), 0);
-  assert.equal(normalized.assetName, 'HavenCity-Setup.exe');
+  assert.equal(normalized.assetName, 'HavenCity-Portable-1.3.0-x64.exe');
   assert.equal(normalized.releaseUrl, 'https://github.com/haven-city/haven-city/releases/tag/v1.3.0');
-  assert.equal(normalized.assetUrl, 'https://github.com/haven-city/haven-city/releases/download/v1.3.0/HavenCity-Setup.exe');
+  assert.equal(normalized.assetUrl, 'https://github.com/haven-city/haven-city/releases/download/v1.3.0/HavenCity-Portable-1.3.0-x64.exe');
 });
 
 test('drafts, prereleases, prerelease tags and missing EXE assets are rejected', () => {

@@ -1,4 +1,4 @@
-export type BuildingKind = 'road' | 'home' | 'apartment' | 'shop' | 'office' | 'park' | 'power' | 'water' | 'clinic' | 'police' | 'prison' | 'school' | 'firestation';
+export type BuildingKind = 'road' | 'home' | 'apartment' | 'shop' | 'office' | 'park' | 'power' | 'water' | 'clinic' | 'police' | 'prison' | 'school' | 'firestation' | 'busstop';
 export type CameraMode = 'city' | 'third' | 'first';
 export type Tool = BuildingKind | 'select' | 'bulldoze';
 export type Speed = 0 | 1 | 3;
@@ -19,7 +19,9 @@ export const PRISON_RULES = {
  strict: { name:'严格管理',description:'加强巡逻与收押，提高治安，服刑时间更长，不安程度会逐渐上升。',upkeep:1.12,perPerson:7,safety:9,arrest:1.6,sentence:60,rehabilitation:-.28,unrest:.65,grant:18 }
 } as const;
 export interface PrisonManagement { intake: boolean; regime: PrisonRegime; unrest: number; rehabilitation: number; released: number; phase: string }
-export interface CityStats { population: number; capacity: number; jobs: number; employed: number; happiness: number; income: number; expenses: number; power: number; powerNeed: number; water: number; waterNeed: number; safety: number; prisoners: number; prisonCapacity: number; crime: number; landValue: number; education: number; fireCoverage: number }
+export interface CityStats { population: number; capacity: number; jobs: number; employed: number; happiness: number; income: number; expenses: number; power: number; powerNeed: number; water: number; waterNeed: number; safety: number; prisoners: number; prisonCapacity: number; crime: number; landValue: number; education: number; fireCoverage: number; transitCoverage: number; transitRiders: number; transitIncome: number; transitExpenses: number }
+export interface TransitJourney { fromId: number; toId: number; path: { x: number; z: number }[]; distance: number; travelled: number; fare: number }
+export interface TransitState { enabled: boolean; fare: number; totalTrips: number; journey: TransitJourney | null }
 export type CareerTrack = 'business' | 'culinary' | 'community';
 export type SkillKind = 'logic' | 'cooking' | 'charisma';
 export interface CareerProgress { xp: number; shifts: number }
@@ -51,9 +53,9 @@ export const CITY_EVENTS:Record<CityEventKind,{name:string;description:string;ic
 };
 export interface Mission { id: string; title: string; description: string; target: number; progress: number; reward: number; completed: boolean }
 export interface Notice { id: number; text: string; kind: 'good' | 'info' | 'bad'; time: number }
-export interface GameState { version: number; money: number; day: number; hour: number; speed: Speed; tax: number; buildings: Building[]; residents: Resident[]; player: Player; stats: CityStats; missions: Mission[]; notices: Notice[]; nextId: number; elapsed: number; weather: string; homes: HomeInterior[]; interior: InteriorVisit | null; prison: PrisonManagement; progression:Progression; civic:CivicState }
+export interface GameState { version: number; money: number; day: number; hour: number; speed: Speed; tax: number; buildings: Building[]; residents: Resident[]; player: Player; stats: CityStats; missions: Mission[]; notices: Notice[]; nextId: number; elapsed: number; weather: string; homes: HomeInterior[]; interior: InteriorVisit | null; prison: PrisonManagement; progression:Progression; civic:CivicState; transit: TransitState }
 export interface ActionResult { ok: boolean; message: string }
-export type Interaction = 'talk' | 'eat' | 'rest' | 'work' | 'relax' | 'adopt' | 'patrol' | 'enter' | 'exit' | 'furniture' | 'study';
+export type Interaction = 'talk' | 'eat' | 'rest' | 'work' | 'relax' | 'adopt' | 'patrol' | 'enter' | 'exit' | 'furniture' | 'study' | 'transit';
 export const FURNITURE: Record<FurnitureKind, FurnitureDef> = {
  bed: { name:'云朵双人床', cost:160, description:'睡个好觉，恢复精力。', x:-5.6,z:-4.4,rotation:0,width:3.3,depth:4,action:'睡觉 · 精力 +60',icon:'rest' },
  kitchen: { name:'原木厨房', cost:140, description:'自己做饭，每餐只需 ¥12。', x:5.8,z:-5.8,rotation:0,width:4.6,depth:1.6,action:'烹饪 · ¥12 / 饱腹 +55',icon:'eat' },
@@ -81,5 +83,6 @@ export const BUILDINGS: Record<BuildingKind, BuildingDef> = {
  police:{name:'社区警局',cost:1800,upkeep:16,capacity:0,jobs:6,description:'巡逻降低犯罪，为监狱提供收押能力。',color:'#9aaebe',category:'管理',icon:'shield'},
  prison:{name:'矫正中心',cost:3200,upkeep:26,capacity:16,jobs:10,description:'容纳 16 人。与警局协作，提供矫正与安全管理。',color:'#c4baaa',category:'管理',icon:'lock'},
  school:{name:'社区学校',cost:2400,upkeep:22,capacity:80,jobs:10,description:'提供 80 个教育名额，提高城市教育与个人学习效率。走近学校可以进修。',color:'#c5b491',category:'公共',icon:'help'},
- firestation:{name:'滨湾消防站',cost:2200,upkeep:20,capacity:0,jobs:8,description:'提供消防覆盖，处理街区火情，保障城市生活。',color:'#b77d66',category:'管理',icon:'shield'}
+ firestation:{name:'滨湾消防站',cost:2200,upkeep:20,capacity:0,jobs:8,description:'提供消防覆盖，处理街区火情，保障城市生活。',color:'#b77d66',category:'管理',icon:'shield'},
+ busstop:{name:'街区公交站',cost:850,upkeep:8,capacity:0,jobs:0,description:'至少两座车站接入同一道路网络才能运营。提供街区公交与居民出行服务。',color:'#6d9c95',category:'公共',icon:'bus'}
 };

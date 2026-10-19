@@ -16,6 +16,7 @@ function fixture(overrides = {}) {
   const controller = createUpdateController({
     release, isPackaged: true, isPortable: false,
     createUpdater: () => { calls.push('create'); return updater; },
+    checkPortableRelease: async () => { calls.push('portable-check'); return { version: '0.4.0', available: true }; },
     publish: state => calls.push(['state', state]),
     openRelease: async url => calls.push(['open', url]),
     prepareInstall: async () => calls.push('save'),
@@ -83,6 +84,56 @@ test('portable checks but opens the release page rather than installing NSIS', a
   assert.ok(calls.some(call => Array.isArray(call) && call[0] === 'open' && call[1] === release.releaseUrl));
   await controller.installUpdate();
   assert.equal(calls.includes('download'), false); assert.equal(calls.includes('save'), false);
+  assert.equal(calls.includes('create'), false); assert.equal(calls.includes('check'), false);
+  assert.equal(calls.filter(call => call === 'portable-check').length, 1);
+});
+
+test('portable current versions never create NSIS or offer a stale installer download', async () => {
+  let checks = 0;
+  const { controller, calls } = fixture({ isPortable: true,
+    createUpdater: () => { throw new Error('must not use NSIS'); },
+    checkPortableRelease: async () => { checks++; return { version: '0.4.0', available: false }; },
+  });
+  assert.equal(checks, 0, 'startup remains offline');
+  const state = await controller.checkForUpdates();
+  assert.equal(state.status, 'current'); assert.equal(state.version, '0.4.0'); assert.equal(checks, 1);
+  await controller.downloadUpdate(); await controller.installUpdate();
+  assert.equal(calls.some(call => Array.isArray(call) && ['open', 'install'].includes(call[0])), false);
+});
+
+test('concurrent portable checks share the release request and publish checking then available', async () => {
+  let finish;
+  let checks = 0;
+  const { controller, calls } = fixture({ isPortable: true,
+    createUpdater: () => { throw new Error('must not use NSIS'); },
+    checkPortableRelease: () => { checks++; return new Promise(resolve => { finish = resolve; }); },
+  });
+  const first = controller.checkForUpdates(), second = controller.checkForUpdates();
+  assert.equal(controller.getState().status, 'checking');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(checks, 1);
+  finish({ version: '0.5.0', available: true });
+  const states = await Promise.all([first, second]);
+  assert.ok(states.every(state => state.status === 'available' && state.version === '0.5.0'));
+  assert.deepEqual(calls.filter(call => Array.isArray(call) && call[0] === 'state').map(call => call[1].status), ['checking', 'available']);
+  assert.equal(calls.includes('check'), false); assert.equal(calls.includes('download'), false);
+});
+
+test('portable network and malformed release failures become retryable errors without touching NSIS', async () => {
+  let attempt = 0;
+  const replies = [new Error('GitHub offline'), { version: '0.5.0-rc.1', available: true }, { version: '0.5.0', available: 'yes' }, { version: '0.5.0', available: true }];
+  const { controller, calls } = fixture({ isPortable: true,
+    createUpdater: () => { throw new Error('must not use NSIS'); },
+    checkPortableRelease: async () => { const reply = replies[attempt++]; if (reply instanceof Error) throw reply; return reply; },
+  });
+  assert.equal((await controller.checkForUpdates()).status, 'error');
+  assert.match(controller.getState().message, /GitHub offline/);
+  assert.equal((await controller.checkForUpdates()).status, 'error');
+  assert.equal((await controller.checkForUpdates()).status, 'error');
+  assert.equal((await controller.checkForUpdates()).status, 'available');
+  await controller.downloadUpdate();
+  assert.ok(calls.some(call => Array.isArray(call) && call[0] === 'open' && call[1] === release.releaseUrl));
+  assert.equal(calls.includes('check'), false); assert.equal(calls.includes('download'), false);
 });
 
 test('network failure becomes a bounded state and can be retried', async () => {

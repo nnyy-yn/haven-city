@@ -1,11 +1,11 @@
 import RAPIER from '@dimforge/rapier3d-compat';
-import { cellToWorld, type GameState } from './types';
+import { cellToWorld, type GameState } from './types.ts';
 
 export class CityPhysics {
   private world: RAPIER.World;
   private controller: RAPIER.KinematicCharacterController;
   private capsule: RAPIER.Collider;
-  private obstacles = new Map<number, RAPIER.Collider>();
+  private obstacles = new Map<number, { collider: RAPIER.Collider; key: string }>();
   private constructor() {
     this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
     this.world.createCollider(RAPIER.ColliderDesc.cuboid(300, .2, 300).setTranslation(0,-.2,0));
@@ -16,13 +16,14 @@ export class CityPhysics {
   }
   static async create() { await RAPIER.init(); return new CityPhysics(); }
   sync(state: GameState) {
-    const ids = new Set(state.buildings.map(b=>b.id));
-    for (const [id,c] of this.obstacles) if(!ids.has(id)) { this.world.removeCollider(c,true);this.obstacles.delete(id); }
-    for(const b of state.buildings) {
-      if(b.kind==='road'||b.kind==='park'||this.obstacles.has(b.id)) continue;
+    const solid=state.buildings.filter(b=>b.kind!=='road'&&b.kind!=='park');
+    const keys=new Map(solid.map(b=>[b.id,`${b.kind}:${b.gx},${b.gz}`]));
+    for (const [id,entry] of this.obstacles) if(keys.get(id)!==entry.key) { this.world.removeCollider(entry.collider,true);this.obstacles.delete(id); }
+    for(const b of solid) {
+      if(this.obstacles.has(b.id)) continue;
       const half = b.kind==='prison'?4.2:b.kind==='home'?3:3.5;
       const c = this.world.createCollider(RAPIER.ColliderDesc.cuboid(half,10,half).setTranslation(cellToWorld(b.gx),10,cellToWorld(b.gz)));
-      this.obstacles.set(b.id,c);
+      this.obstacles.set(b.id,{collider:c,key:keys.get(b.id)!});
     }
   }
   move(x:number,z:number,dx:number,dz:number,dt:number) {

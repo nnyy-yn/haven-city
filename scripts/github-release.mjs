@@ -1,5 +1,5 @@
 import {execFileSync} from 'node:child_process';
-import {readFile,stat,readdir} from 'node:fs/promises';
+import {readFile,stat} from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
 import {resolve} from 'node:path';
 
@@ -28,20 +28,15 @@ if(process.argv.includes('--create-repo')){
 }
 if(process.argv.includes('--publish-release')){
   const tag=`v${version}`;
-  let release=await request(`/repos/${owner}/${repo}/releases/tags/${tag}`);
-  if(!release)release=await request(`/repos/${owner}/${repo}/releases`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag_name:tag,name:`栖湾市 ${version} · Windows 版`,draft:false,prerelease:false,body:'Windows x64：下载 HavenCity-Setup 安装版，游戏菜单中可检查、下载并确认安装后续更新。Portable 为免安装版，更新时下载新版替换。\n\n本版加入职业与技能、学校与消防站、城市事件和政策，优化夜景、连续铺路和面板可读性。支持离线游玩，更新会保留本地存档。\n\n浏览器离线版与完整源码包也包含在附件中。EXE 当前未做商业代码签名。'})});
   const directory=resolve(root,'desktop/release');
-  const files=(await readdir(directory)).filter(name=>/\.(exe|blockmap)$/.test(name)||name==='latest.yml');
-  // GitHub sanitizes non-ASCII asset names. Keep public download URLs stable and readable.
-  const extraNames=new Map([
-    ['../../栖湾市-可玩原型.zip',`HavenCity-${version}-Source.zip`],
-    ['../../栖湾市.html',`HavenCity-${version}-Offline.html`],
-  ]);
-  files.push(...extraNames.keys());
-  // Publish installers first, then latest.yml so the update manifest never points to a missing installer.
-  files.sort((a,b)=>Number(a==='latest.yml')-Number(b==='latest.yml'));
+  const files=[`HavenCity-Portable-${version}-x64.exe`];
+  for(const relative of files)if(!(await stat(resolve(directory,relative))).size)throw new Error(`Empty release asset: ${relative}`);
+  const body=await readFile(resolve(root,'RELEASE_NOTES.md'),'utf8');
+  let release=await request(`/repos/${owner}/${repo}/releases/tags/${tag}`);
+  // Publish only the portable EXE, after its upload has completed.
+  if(!release)release=await request(`/repos/${owner}/${repo}/releases`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag_name:tag,name:`栖湾市 ${version} · Windows 免安装版`,draft:true,prerelease:false,body})});
   for(const relative of files){
-    const path=resolve(directory,relative),name=extraNames.get(relative)||relative.split('/').pop(),size=(await stat(path)).size;
+    const path=resolve(directory,relative),name=relative.split('/').pop(),size=(await stat(path)).size;
     if(release.assets.some(asset=>asset.name===name&&asset.size===size)){console.log(`Already uploaded: ${name}`);continue;}
     if(release.assets.some(asset=>asset.name===name))throw new Error(`A different asset already exists: ${name}`);
     const endpoint=release.upload_url.replace(/\{.*$/,'')+`?name=${encodeURIComponent(name)}`;
@@ -49,6 +44,7 @@ if(process.argv.includes('--publish-release')){
     if(!response.ok)throw new Error(`Asset upload failed (${response.status}): ${name}`);
     const asset=await response.json();console.log(JSON.stringify({name:asset.name,size:asset.size,state:asset.state}));
   }
+  if(release.draft)await request(`/repos/${owner}/${repo}/releases/${release.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({draft:false,make_latest:'true'})});
   const published=await request(`/repos/${owner}/${repo}/releases/tags/${tag}`);
   console.log(JSON.stringify({release:published.html_url,assets:published.assets.map(asset=>({name:asset.name,size:asset.size,state:asset.state}))}));
 }

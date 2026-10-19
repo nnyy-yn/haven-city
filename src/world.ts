@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { cellToWorld, TILE, type Building, type BuildingKind, type CameraMode, type GameState } from './types';
 import { CityEventVisuals } from './city-events';
+import { DistrictBatch } from './district-batch';
+import { TransitVisuals } from './transit-visuals';
 
 const C = {
   grass: '#74865b', grassLight: '#92a273', path: '#d4cbb6', concrete: '#c3c5bc', asphalt: '#3c474a',
@@ -152,6 +154,39 @@ function makePlayer(): PersonRig {
   return { group, arms, legs };
 }
 
+function makeBus() {
+  const group = new THREE.Group(), bus = new Batch();
+  const teal = mat('#477f7b'), cream = mat('#e7e5d6'), dark = mat(C.dark), glazing = mat('#365662', .25, .3);
+  glazing.emissive.set('#e4bb79'); glazing.userData.nightIntensity = .14;
+  bus.box(dark, 0, .56, 0, 2.1, .3, 6.5);
+  bus.box(teal, 0, 1.03, 0, 2.2, 1.05, 6.8); bus.box(cream, 0, 2.0, 0, 2.18, 1.25, 6.7);
+  bus.box(teal, 0, 1.33, 0, 2.23, .18, 6.82);
+  for (const side of [-1, 1]) {
+    bus.box(glazing, side * 1.105, 2.03, -.15, .045, .85, 5.85);
+    for (let z = -2.78; z < 3.05; z += .96) bus.box(cream, side * 1.135, 2.04, z, .05, .94, .075);
+    bus.box(teal, side * 1.12, 2.63, 0, .06, .18, 6.65);
+    for (const z of [-2.25, 2.25]) {
+      bus.cylinder(dark, side * 1.1, .46, z, .43, .18, 0, Math.PI / 2);
+      bus.cylinder(cream, side * 1.2, .46, z, .22, .035, 0, Math.PI / 2);
+    }
+    bus.box(dark, side * 1.24, 2.43, 2.72, .27, .06, .07); bus.box(cream, side * 1.37, 2.28, 2.74, .12, .37, .24);
+    bus.box(cream, side * 1.14, .91, -.7, .035, .11, 2.25);
+  }
+  bus.box(glazing, 0, 2.03, 3.37, 1.96, .94, .065); bus.box(glazing, 0, 2.1, -3.37, 1.83, .76, .06);
+  bus.box(dark, -.46, 1.77, 3.42, .04, .02, .48, -.18); bus.box(dark, .46, 1.77, 3.42, .04, .02, .48, -.18);
+  bus.box(cream, 0, 2.79, 0, 2.22, .2, 6.9); bus.box(teal, 0, 2.93, -.65, 1.48, .18, 2.1);
+  for (let z = -1.4; z < .2; z += .19) bus.box(dark, 0, 3.04, z, 1.05, .025, .06);
+  bus.box(dark, 1.15, 1.47, 1.72, .065, 1.75, 1.13); bus.box(glazing, 1.19, 1.67, 1.72, .035, 1.26, .93);
+  bus.box(cream, 1.215, 1.6, 1.72, .025, 1.55, .06);
+  for (const side of [-1, 1]) {
+    bus.box(mat('#f5e5ba'), side * .78, .93, 3.43, .34, .2, .055);
+    bus.box(mat('#9c5347'), side * .83, .94, -3.43, .16, .4, .045);
+  }
+  bus.box(dark, 0, .75, 3.43, .95, .18, .06); bus.box(cream, 0, .91, -3.44, .55, .17, .04);
+  addSign(bus, '01 · 栖 湾 公 交', '#294c47', 2.58, 3.425, 1.88, .25);
+  bus.finish(group); return group;
+}
+
 export class CityWorld {
   scene = new THREE.Scene();
   ground: THREE.Object3D;
@@ -180,6 +215,8 @@ export class CityWorld {
   private sun: THREE.DirectionalLight;
   private ambient: THREE.HemisphereLight;
   private eventVisuals: CityEventVisuals;
+  private districtBatch: DistrictBatch;
+  private transitVisuals: TransitVisuals;
   private lightPools = new THREE.Group();
   private streetPools = new THREE.Group();
   private lightPoolMaterial: THREE.MeshBasicMaterial;
@@ -217,6 +254,7 @@ export class CityWorld {
     const outline = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(9.7, .15, 9.7)), new THREE.LineBasicMaterial({ color: '#d6ffe4', transparent: true, opacity: .9 }));
     outline.position.y = .18; this.ghost.add(outline); this.ghost.visible = false; this.scene.add(this.ghost);
     this.createCars(); this.eventVisuals = new CityEventVisuals(this.scene);
+    this.districtBatch = new DistrictBatch(this.scene); this.transitVisuals = new TransitVisuals(this.scene, makeBus());
   }
 
   private createCoast() {
@@ -319,7 +357,8 @@ export class CityWorld {
     const roads = new Set(state.buildings.filter(b => b.kind === 'road').map(b => `${b.gx},${b.gz}`));
     const roadSignature = [...roads].sort().join('|'); const roadsChanged = roadSignature !== this.roadSignature;
     for (const b of state.buildings) {
-      const key = `${b.kind}:${b.gx},${b.gz}:${b.level}:${b.active}:${b.kind === 'road' ? roadSignature : ''}`;
+      const adjacentRoads = [[0, 1], [1, 0], [0, -1], [-1, 0]].map(([dx, dz]) => Number(roads.has(`${b.gx + dx},${b.gz + dz}`))).join('');
+      const key = `${b.kind}:${b.gx},${b.gz}:${b.level}:${b.active}:${adjacentRoads}`;
       if (this.buildingKeys.get(b.id) === key) continue;
       const old = this.buildingMeshes.get(b.id); if (old) this.removeGroup(old);
       const group = b.kind === 'road' ? this.createRoad(b, roads) : this.createBuilding(b, roads);
@@ -331,6 +370,7 @@ export class CityWorld {
     if (roadsChanged) { this.roadSignature = roadSignature; this.rebuildStreetFurniture(state, roads); this.rebuildTraffic(roads); }
     const parcelSignature = state.buildings.map(b => `${b.id}:${b.gx},${b.gz}`).join('|');
     if (parcelSignature !== this.parcelSignature) { this.parcelSignature = parcelSignature; this.rebuildVacantLots(state, roads); }
+    this.districtBatch.sync(this.buildingMeshes); this.transitVisuals.sync(state);
     this.eventVisuals.sync(state, this.buildingMeshes); this.highlight(this.selectedId);
   }
 
@@ -628,6 +668,30 @@ export class CityWorld {
         hedge(a, 4.22, -.9, .38, 7.65, .5); tree(a, -4.3, -4.1, .6, b.id);
         break;
       }
+      case 'busstop': {
+        group.userData.roofHeight = 3.15;
+        const teal = mat('#477f7b'), trim = mat('#e7e5d6');
+        a.box(mat('#9ca996'), 0, .18, -.2, 8.6, .15, 8.5);
+        a.box(mat('#c6c6b5'), 0, .28, .2, 8.2, .09, 7.4);
+        for (const x of [-2.95, 2.95]) a.box(dark, x, 1.55, -1.42, .13, 2.55, .13);
+        a.box(glass, 0, 1.63, -1.62, 6.0, 1.95, .08);
+        for (const x of [-3.0, 3.0]) a.box(glass, x, 1.63, -.78, .07, 1.95, 1.7);
+        a.box(trim, 0, 2.97, -.55, 6.75, .18, 2.85); a.box(teal, 0, 2.84, .86, 6.8, .3, .11);
+        a.box(teal, 0, 3.1, -.55, 6.38, .09, 2.58);
+        addSign(a, '栖 湾 公 交  ·  BUS', '#477f7b', 2.83, .925, 5.8, .24);
+        bench(a, -1.25, -.83); bench(a, 1.0, -.83);
+        a.box(trim, 1.95, 1.55, -1.55, 1.35, 1.5, .07);
+        for (let i = 0; i < 7; i++) a.box(i < 2 ? teal : mat('#a2b2a3'), 1.95, 2.07 - i * .17, -1.5, 1.08 - (i % 3) * .12, .045, .025);
+        a.cylinder(dark, 3.64, 1.6, 2.24, .055, 2.6); a.box(teal, 3.64, 2.78, 2.24, 1.05, 1.12, .15);
+        a.add(planeGeo, sign('BUS', '#477f7b'), 3.64, 2.97, 2.325, .87, .23, 1);
+        a.box(trim, 3.64, 2.56, 2.33, .79, .37, .025); a.box(teal, 3.64, 2.57, 2.35, .56, .06, .025);
+        a.box(mat('#d2bd7e'), -.45, .36, 3.23, 6.7, .035, .72);
+        for (let x = -3.65; x < 2.85; x += .23) a.box(mat('#e7dab2'), x, .388, 3.23, .055, .02, .61);
+        a.cylinder(dark, -3.72, .8, 1.3, .31, .95); a.cylinder(trim, -3.72, 1.3, 1.3, .35, .08);
+        for (const x of [-3.85, 3.85]) { a.box(trim, x, .55, -3.25, .7, .6, .9); hedge(a, x, -3.25, .65, .84, .75); }
+        solar(a, .1, 3.24, -.55, 2.7, 1.55);
+        break;
+      }
       case 'prison': {
         const wall = mat('#c9c5b3');
         a.box(mat('#a4ad95'), 0, .19, 0, 8.7, .2, 8.7);
@@ -650,7 +714,7 @@ export class CityWorld {
       }
     }
     if(b.level>1){
-      if(!['home','apartment','office','park','school','firestation'].includes(b.kind))group.scale.y=1+(b.level-1)*.16;
+      if(!['home','apartment','office','park','school','firestation','busstop'].includes(b.kind))group.scale.y=1+(b.level-1)*.16;
       // Bronze entry markers make upgraded public facilities legible from the street.
       a.box(mat('#ac9469'),3.6,.75,3.9,.65,1.1,.12);
       for(let i=0;i<b.level;i++)a.box(mat('#eee2bb'),3.42+i*.17,.8,3.98,.065,.4,.025);
@@ -678,7 +742,8 @@ export class CityWorld {
     (this.scene.background as THREE.Color).lerpColors(this.nightSky, this.daySky, daylight);
     (this.scene.fog as THREE.Fog).color.copy(this.scene.background as THREE.Color);
     this.player.position.set(state.player.x, .06, state.player.z); this.player.rotation.y = state.player.yaw;
-    this.player.visible = mode !== 'first';
+    this.player.visible = mode !== 'first' && !state.transit.journey;
+    this.transitVisuals.update(step, state, mode);
     const distance = this.lastPlayer.distanceTo(new THREE.Vector2(state.player.x, state.player.z));
     const walk = distance > .003 ? Math.sin(this.walkTime * 10) * .55 : 0;
     this.playerRig.legs.forEach((limb, i) => limb.rotation.x = i ? -walk : walk);
@@ -733,14 +798,17 @@ export class CityWorld {
   highlight(id: number | null) {
     this.selectedId = id; const group = id === null ? null : this.buildingMeshes.get(id);
     this.selection.visible = !!group; if (group) this.selection.position.set(group.position.x, .25, group.position.z);
+    this.transitVisuals.highlight(id);
   }
 
   getEventMarkers() { return this.eventVisuals.getMarkers().map(marker => ({ ...marker })); }
+  setStaticBatching(enabled: boolean) { this.districtBatch.setEnabled(enabled); }
+  getRenderDiagnostics() { return { static: this.districtBatch.getDiagnostics(), transit: this.transitVisuals.getDiagnostics() }; }
 
   private removeGroup(group: THREE.Group) { this.scene.remove(group); this.clearGroup(group); }
   private clearGroup(group: THREE.Group) { group.traverse(o => { if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).geometry.dispose(); }); group.clear(); }
   dispose() {
-    this.eventVisuals.dispose();
+    this.eventVisuals.dispose(); this.districtBatch.dispose(); this.transitVisuals.dispose();
     const ownedMaterials = new Set<THREE.Material>();
     this.scene.traverse(o => {
       const mesh = o as THREE.Mesh;

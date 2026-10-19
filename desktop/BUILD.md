@@ -1,17 +1,15 @@
-# Windows 构建与发布
+# Windows 免安装版构建与发布
 
-使用 Node.js 22.12 或更新版。依赖固定为 Electron 44.9.0、electron-builder 26.15.3、electron-updater 6.8.9。
+使用 Node.js 22.12 或更新版。依赖固定为 Electron 44.9.0、electron-builder 26.15.3、electron-updater 6.8.9（保留旧安装版桥兼容）。
 
-1. 在游戏根目录生成离线版，将最终离线 HTML 复制为 `desktop/game/index.html`；若使用资源目录版，连同依赖资源一起复制，使用相对路径。
-2. 编辑 `desktop/release-config.json`，填写公开 GitHub 仓库 `owner` 和 `repo`。空 owner 仍可运行游戏，更新状态为 `unconfigured`。仓库配置同时供打包元数据和运行时使用。
-3. 在 `desktop/` 执行 `npm install`、`npm test`，然后 `npm run build:win`。首次构建需要网络下载 Electron 与 NSIS 工具。
-4. `release/` 输出 `HavenCity-Setup-0.3.0-x64.exe`、`HavenCity-Portable-0.3.0-x64.exe`、安装包 `.blockmap` 和 `latest.yml`（已配置仓库时）。`npm run pack` 仅生成解包目录，`npm start` 本地运行。
-5. 在 GitHub 创建公开正式版本 `v0.3.0`，同时上传两个 EXE、安装包 `.blockmap`、`latest.yml`。构建命令固定 `--publish never`，不会上传或创建远程版本。
+1. 在游戏根目录运行 `pnpm --config.verify-deps-before-run=false run build`，生成离线 HTML。
+2. 首次准备桌面依赖：`pnpm --dir desktop install --ignore-scripts`，然后 `node desktop/node_modules/electron/install.js`。
+3. 同步根 `package.json`、`desktop/package.json`、`src/release-config.json` 的版本；两处 `release-config.json` 保持相同公开仓库 owner/repo。
+4. 运行 `node scripts/build-windows.mjs`，自动复制最新离线版并输出单文件 `desktop/release/HavenCity-Portable-0.4.0-x64.exe`。
+5. 修改 `RELEASE_NOTES.md`，提交源码并推送对应版本标签。运行 `node scripts/github-release.mjs --publish-release`，只上传当前版本的免安装 EXE，上传完成后才公开该次发行。
 
-后续更新同时提高 `desktop/package.json` 与游戏版本，以相同仓库构建并发布更高版本标签及全套制品。安装版用 `latest.yml` 与 SHA-512 检查下载完整性，下载后仍需点击安装并确认；Portable 不承诺自动替换。不要在包内放 GitHub Token；如通过 CI 发布，令牌只存 CI Secret。
+用户只需下载 EXE 并双击。运行不需要安装器、外网、Node.js 或开发服务器。首次启动会在临时目录展开内置运行时，完整游戏内容均已打包在 EXE 中。
 
-生产签名可用 electron-builder 的证书环境变量配置。未签名首版可能显示 Windows SmartScreen 发布者提示；签名身份要在后续版本保持一致。卸载不会主动删除存档。更改应用名称或 `appId` 会影响安装和存档身份。
+免安装版仅在点击“检查更新”时请求固定仓库的 GitHub API，验证稳定版本及其精确匹配的 Portable EXE；API 限流时改用公开发行页与 EXE 地址的 HEAD 请求核实版本和文件，不下载文件。发现新版后打开固定发行页，用户下载新版、关闭游戏后替换旧 EXE；不会自动安装，不依赖 `latest.yml` 或安装包。保留相同 appId、应用名称与游戏源，存档继续使用原来的用户数据位置。旧版玩家也可从菜单导出 JSON，再导入到新版。
 
-当前配置采用 v26 及 updater 6：`quitAndInstall(false, true)`、`autoInstallOnAppQuit=false`。将来升级 v27/updater 7 时，按[官方迁移文档](https://www.electron.build/docs/migration/v27-breaking-changes/)调整安装参数、手动安装策略、签名清单和构建选项。
-
-参考：[NSIS 配置](https://www.electron.build/v26/configuration/nsis)、[手动更新](https://www.electron.build/v26/docs/features/auto-update/)、[Electron 安全要求](https://www.electronjs.org/docs/latest/tutorial/security)。
+打包命令固定 `--publish never`，仅显式运行发布脚本才上传。GitHub 凭证只由发布工具在内存中从系统 Git 凭证助手读取，游戏中不包含令牌。EXE 当前未作商业代码签名。
