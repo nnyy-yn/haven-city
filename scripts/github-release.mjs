@@ -32,11 +32,16 @@ if(process.argv.includes('--publish-release')){
   if(!release)release=await request(`/repos/${owner}/${repo}/releases`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag_name:tag,name:`栖湾市 ${version} · Windows 版`,draft:false,prerelease:false,body:'Windows x64：下载 HavenCity-Setup 安装版，游戏菜单中可检查、下载并确认安装后续更新。Portable 为免安装版，更新时下载新版替换。\n\n本版加入职业与技能、学校与消防站、城市事件和政策，优化夜景、连续铺路和面板可读性。支持离线游玩，更新会保留本地存档。\n\n浏览器离线版与完整源码包也包含在附件中。EXE 当前未做商业代码签名。'})});
   const directory=resolve(root,'desktop/release');
   const files=(await readdir(directory)).filter(name=>/\.(exe|blockmap)$/.test(name)||name==='latest.yml');
-  files.push('../../栖湾市-可玩原型.zip','../../栖湾市.html');
+  // GitHub sanitizes non-ASCII asset names. Keep public download URLs stable and readable.
+  const extraNames=new Map([
+    ['../../栖湾市-可玩原型.zip',`HavenCity-${version}-Source.zip`],
+    ['../../栖湾市.html',`HavenCity-${version}-Offline.html`],
+  ]);
+  files.push(...extraNames.keys());
   // Publish installers first, then latest.yml so the update manifest never points to a missing installer.
   files.sort((a,b)=>Number(a==='latest.yml')-Number(b==='latest.yml'));
   for(const relative of files){
-    const path=resolve(directory,relative),name=relative.split('/').pop(),size=(await stat(path)).size;
+    const path=resolve(directory,relative),name=extraNames.get(relative)||relative.split('/').pop(),size=(await stat(path)).size;
     if(release.assets.some(asset=>asset.name===name&&asset.size===size)){console.log(`Already uploaded: ${name}`);continue;}
     if(release.assets.some(asset=>asset.name===name))throw new Error(`A different asset already exists: ${name}`);
     const endpoint=release.upload_url.replace(/\{.*$/,'')+`?name=${encodeURIComponent(name)}`;

@@ -27,7 +27,7 @@ try{
   await page.locator('[aria-label="游戏菜单"]').click();
   if(process.env.HAVEN_UPDATE_LIVE==='1'){
     await page.locator('[data-ui="check-update"]').click();
-    await page.waitForFunction(async()=>['current','error','available'].includes((await window.havenDesktop.getUpdateState()).status),{},{timeout:45000});
+    await page.locator('#update-state .update-status.current, #update-state .update-status.error, #update-state .update-status.available').waitFor({timeout:45000});
     const update=await page.evaluate(()=>window.havenDesktop.getUpdateState());
     check('published GitHub feed confirms this EXE is current',update.status==='current',update);
     await page.screenshot({path:resolve(out,'02-desktop-current-release.png')});
