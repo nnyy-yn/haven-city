@@ -1,0 +1,11 @@
+import {execFileSync} from 'node:child_process';
+import {mkdir,copyFile,readFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
+const root=resolve(import.meta.dirname,'..');
+const web=JSON.parse(await readFile(resolve(root,'src/release-config.json'),'utf8'));
+const desktop=JSON.parse(await readFile(resolve(root,'desktop/release-config.json'),'utf8'));
+const pkg=JSON.parse(await readFile(resolve(root,'desktop/package.json'),'utf8'));
+if(web.owner!==desktop.owner||web.repo!==desktop.repo||web.version!==pkg.version)throw new Error('Desktop/web release configuration does not match.');
+await mkdir(resolve(root,'desktop/game'),{recursive:true});
+await copyFile(resolve(root,'栖湾市.html'),resolve(root,'desktop/game/index.html'));
+execFileSync(process.execPath,[resolve(root,'desktop/node_modules/electron-builder/cli.js'),'--config','electron-builder.cjs','--win','nsis','portable','--x64','--publish','never'],{cwd:resolve(root,'desktop'),stdio:'inherit',windowsHide:true,env:{...process.env,CSC_IDENTITY_AUTO_DISCOVERY:'false'}});

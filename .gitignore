@@ -1,0 +1,11 @@
+node_modules/
+node_modules-install-attempt/
+dist/
+*.log
+playtest/
+.pnpm-store/
+desktop/game/
+desktop/release/
+desktop/.cache/
+tools/
+栖湾市-可玩原型.zip

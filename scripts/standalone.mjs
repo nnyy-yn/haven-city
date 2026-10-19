@@ -1,0 +1,14 @@
+import { readFile,writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+const root=resolve(import.meta.dirname,'..');
+const dist=resolve(root,'dist');
+let html=await readFile(resolve(dist,'index.html'),'utf8');
+const script=html.match(/<script[^>]+src="([^"]+)"[^>]*><\/script>/);
+const style=html.match(/<link[^>]+href="([^"]+\.css)"[^>]*>/);
+if(!script||!style) throw new Error('Missing production bundle');
+const js=(await readFile(resolve(dist,script[1].replace(/^\//,'')),'utf8')).replace(/<\/script/gi,'<\\/script');
+const css=await readFile(resolve(dist,style[1].replace(/^\//,'')),'utf8');
+html=html.replace(script[0],()=>`<script type="module">${js}</script>`).replace(style[0],()=>`<style>${css}</style>`);
+await writeFile(resolve(root,'栖湾市.html'),html);
+await writeFile(resolve(dist,'栖湾市.html'),html);
+console.log('Offline edition: 栖湾市.html');

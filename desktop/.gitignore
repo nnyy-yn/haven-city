@@ -1,0 +1,4 @@
+node_modules/
+release/
+game/*
+!game/.gitkeep
